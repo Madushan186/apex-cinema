@@ -24,6 +24,7 @@ import { getFirestore, Timestamp } from "firebase-admin/firestore";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { CreateHoldResult } from "../src/lib/inventory";
 import { COLLECTIONS } from "../src/lib/firestore";
+import { EMULATOR_PORTS, TEST_PROJECT_ID } from "./testEmulatorPorts";
 
 const PASSWORD = "TestPass!12345";
 const OWNER_EMAIL = "test-owner-authspec@apexcinema.test";
@@ -73,11 +74,11 @@ beforeAll(async () => {
   // The Auth SDK (unlike Firestore/Functions) requires a non-empty apiKey in
   // the app config before it will even talk to the emulator — a dummy value
   // is fine since the emulator never validates it against a real project.
-  app = initializeApp({ apiKey: "demo-api-key", projectId: "demo-apex-cinema" }, "staff-auth-emulator-test");
+  app = initializeApp({ apiKey: "demo-api-key", projectId: TEST_PROJECT_ID }, "staff-auth-emulator-test");
   auth = getAuth(app);
-  connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
+  connectAuthEmulator(auth, `http://127.0.0.1:${EMULATOR_PORTS.auth}`, { disableWarnings: true });
   functions = getFunctions(app);
-  connectFunctionsEmulator(functions, "127.0.0.1", 5001);
+  connectFunctionsEmulator(functions, "127.0.0.1", EMULATOR_PORTS.functions);
   getStaffSchedule = httpsCallable(functions, "getStaffSchedule");
   getOwnerOverview = httpsCallable(functions, "getOwnerOverview");
   createHold = httpsCallable(functions, "createHold");

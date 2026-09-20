@@ -6,8 +6,8 @@ At the start of any session: read `CLAUDE.md`, then this file, then skim `docs/D
 
 ## Environment notes (updated 2026-09-20)
 
-- Repo: no commits yet, branch `main`. Nothing has been committed by any session — everything described below exists on disk, staged for the user to commit when ready.
-- Node: v26.5.0, npm 11.17.0.
+- Repo: pushed to `https://github.com/Madushan186/apex-cinema`, `main` branch, up to date through the "Dev-server blank-screen fix" entry above. This phase's work (Phase 5) lives on a local feature branch, `feature/staff-manual-bookings`, cut from verified `main` — not merged or pushed, per this phase's instructions.
+- Node: v26.5.0, npm 11.17.0 — the Cloud Functions target is Node **22** (`functions/package.json` `engines.node`); this mismatch is expected on this machine and only matters at actual deploy time, not local emulator development (flagged again each phase per instruction, unchanged).
 - Java: **now installed** — `openjdk@21` via `brew install openjdk@21` (formula, no sudo needed; the `--cask temurin` alternative needs sudo for a system symlink and was not used). Required by the Firestore/Auth emulators (JDK 11+ per Firebase's official emulator docs, checked 2026-09-20). Not on PATH by default — see README.md for the export line, or prefix commands with `PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"`.
 - `firebase-tools` is now a root devDependency (15.30.2) — no global install needed, invoke via `npm run` scripts or `npx firebase`.
 - **A logo file appeared in `public/brand/`** (`Logo (1).png`, 1536×1024 PNG, ~2.1MB) between the planning-docs session and this one — added outside any session I ran. It was left completely untouched (not renamed, not moved, not processed) per CLAUDE.md rule 8. Note: CLAUDE.md/PROJECT_BRIEF.md reference the path `public/brand/apex-logo.png` specifically — the actual file has a different name, so nothing in the app currently resolves to it (the favicon link in `app/index.html` points at the documented `apex-logo.png` path and will 404 until this is reconciled). **Needs an owner decision**: rename the file to match the docs, or update the docs to match the actual filename — not done automatically since it wasn't asked for and visual-direction work is an explicitly separate future phase (1c below).
@@ -577,12 +577,316 @@ Preview URL: **http://localhost:5173/** — Home, `/book`, `/staff/login` all co
 
 `app/vite.config.ts` (added `optimizeDeps.include`) — the only source change. `docs/PROGRESS.md` (this entry). No changes to `packages/booking-core`, `functions`, or any generated `dist`/`lib` output.
 
-### Phase 5 — proposed next steps (not started, not approved)
+### Phase 5 — Staff/Owner manual bookings (local emulators only)
 
-- **5a. Resolve remaining open decisions**: exact deposit amount (#3), party notice definition (#1) and duration (#2), staff-cancellation cutoff (#6) — needed before payment/confirmation or manual-booking work.
-- **5b. Staff/owner mutations**: cancellation, extension approval, and manual (phone-arranged, including Party) booking entry — all through the existing inventory transaction pattern, with an audit trail per docs/SECURITY.md §3.
-- **5c. Payment confirmation**: once the deposit question is answered, a `confirmBooking`-style function transitioning `pending_hold` → `confirmed` — still no live PayHere without explicit approval.
-- **5d. Owner MFA**, if/when Identity Platform + Blaze billing is approved.
-- **5e. Lazy-load the emulator adapters** to undo the Phase 3 bundle-size regression, if that becomes a priority before real users see the fixture-mode marketing pages.
+**Status: done, verified 2026-09-20 (Node mismatch noted below).** Implements Phase 4's proposed item 5b, scoped down exactly as this phase's brief specified: standard rooms 1–5 only (Non-AC/AC Small/AC Large), no Party, no cancellation/extension/payment work.
+
+#### Manual-reservation semantics (explicit, per this phase's brief)
+
+A manual booking created by Staff or Owner is a **confirmed room reservation with `paymentStatus: "unpaid"`**. Booking confirmation is not payment confirmation — no money has been collected, recorded, or even asked about. `paymentStatus` is a fixed value written once at creation; there is no edit path for it this phase (see docs/DECISIONS.md D14). This mirrors CLAUDE.md rule 6 ("keep booking status and payment status as separate state machines") literally: `bookingStatus: "confirmed"` and `paymentStatus: "unpaid"` are two independent fields on the same doc, never conflated. Out of scope, explicitly not built: payment collection/recording, editing `paymentStatus`, deposits, refunds, cancellation, extensions, and Party (Room 6) bookings of any kind.
+
+#### Backend (`functions/src`)
+
+- **`createManualBooking`** (new) — Staff or Owner only (`requireRole(request, ["staff", "owner"])`, checked *before* touching the request body). Reuses `functions/src/lib/inventory.ts`'s exact transactional inventory pattern via a new `createManualBookingTransactional` in the same file — same `findFreeRoom`/`isActive`/`minutesOverlap` functions `createHold` already uses, so manual reservations and online holds share one real inventory and can never disagree about room occupancy (a manual booking and a guest hold racing for the last room in a single-room tier resolve exactly the way two guest holds would). Differences from `createHoldTransactional`, all intentional: writes `bookingStatus: "confirmed"` directly (no pending-hold stage) with a `confirmed` interval (`holdExpiresAtMillis: null`), which — because `isActive()` already treats `"confirmed"` as permanently active — means a manual reservation can never expire the way an online hold does; writes `paymentStatus: "unpaid"`; records `createdBy` (the actor's uid) and `source` (`"staff_walkin"` | `"staff_phone"`, matching the values docs/ARCHITECTURE.md §3 already anticipated); and writes one `auditLog` entry in the same transaction (`actorUid`, `action: "manual_booking_created"`, `targetType`, `targetId`, `roomId`, `dateISO`, `source`, server timestamp — deliberately **no customer name/phone/email**, per docs/SECURITY.md §8). Idempotency uses its own `manualBookingIdempotency` collection (not `holdIdempotency`) with a fingerprint that includes `actorUid`, so a valid replay only ever matches the same staff/owner account resubmitting its own attempt with the same key and payload.
+- **`lib/validation.ts`**'s new `validateManualBookingRequest` mirrors `validateHoldRequest`'s strictness (same package/date/time/capacity/phone checks, reusing `validateBookablePackageId` — which already excludes Party) with two differences: email is optional, and a required `source` (`"staff_walkin"` | `"staff_phone"` only — no `"staff_party"` this phase).
+- **`lib/schedule.ts`**'s `ScheduleBooking` gained an optional `paymentStatus` field (`null` for online holds/bookings, which don't write it yet) — read-only, purely for the staff schedule's "Unpaid" badge; no other behavior changed.
+- **`packages/booking-core`**'s shared `PaymentStatus` type gained `"unpaid"` (docs/DECISIONS.md D14) — additive, the existing online-payment states (`initiated`/`pending`/`succeeded`/...) are untouched.
+- **`firestore.rules`** — added explicit deny blocks for the two new collections (`manualBookingIdempotency`, `auditLog`), matching the existing per-collection pattern (the file's catch-all already denied them; explicit rules are for clarity/defense-in-depth, same reasoning as every other collection here). No collection needed a new *allow* — every staff/owner read/write still goes through a Cloud Function.
+
+#### Frontend (`app/src`)
+
+- **`routes/staff/NewManualBooking.tsx`** (new route, `/staff/new-booking`, Staff or Owner via `RequireRole`) — a two-phase flow (`form` → `review` → `success`) in one page, not a multi-page wizard: fill the form, click "Review booking" to see the summary (package, date, start–end time, people, price, customer, source, note, and a **"Payment not recorded — unpaid"** notice) exactly as required, then "Confirm booking". On success, shows the reference code, assigned room, and payment status. A generated `idempotencyKey` (fresh per review, stable across retries of the same review) is sent with the request; on any error the form/review state is left completely untouched — nothing is cleared — so a slot that became unavailable between browsing and submitting can be fixed (pick another time) without retyping customer details.
+- **`components/staff/ManualBookingForm.tsx`** — package (3 radio cards, reusing the same catalog/adapter as the customer wizard), date (quick-pick Today/Tomorrow + native date input, `min`/`max` bounded to the booking window), start time (the 4 fixed slots only, live-checked against real availability via the existing `getAvailability` adapter so staff see available/limited/full before submitting — full/past slots are disabled, exactly like the customer wizard), people count (bounded to the selected package's `maxPeople`), customer name/phone (required) and email (optional), source (walk-in/phone), and an optional short staff note. Every field uses the existing `Field`/`Input`/`Label` components for consistent accessible labeling; client-side validation (`lib/manualBookingValidation.ts`) mirrors the server's rules for immediate feedback, the server re-validates everything regardless (docs/ARCHITECTURE.md §2).
+- **`components/staff/ManualBookingReview.tsx`** — the review summary + the required unpaid notice + Confirm/Edit-details buttons, with a Notice-based error slot for the unavailable/invalid/conflict/unknown states.
+- **`routes/staff/StaffSchedule.tsx`** — added a "+ New manual booking" link next to the date navigator, and an "Unpaid" badge next to the status badge on any booking row with `paymentStatus === "unpaid"`. The schedule already refetches on every date change via its existing `usePromise`, so a newly-created manual booking appears automatically the moment staff land back on `/staff` — "Back to schedule" on the success screen navigates to `/staff?date=<the booked date>` specifically so this happens without any extra clicking, even if the booking was for a future date.
+- **Bug found and fixed during this phase's own verification**: `ManualBookingForm` originally fetched the package catalog itself (its own `usePromise(() => packagesAdapter.listPackages(), [])`), duplicating the parent route's identical fetch. Two independent network calls to the same `getPackages` function occasionally raced — a fast (or scripted) submit could hit "Review booking" before the *parent's* copy of the list had resolved, silently falling back to `maxPeople: 1` for validation and rejecting a valid people count. Fixed by fetching the catalog once in the parent route and passing it down as a prop — not just a test workaround, a real duplicate-fetch race a fast human user could have hit too. Caught by the new Playwright test, not by typecheck/lint/unit tests.
+
+#### Verification actually run
+
+**Environment note (Node mismatch, as requested):** this machine runs Node **v26.5.0**; the project's Cloud Functions target (`functions/package.json` `engines.node`) is **22**. Same pre-existing, already-documented mismatch as every prior phase (see README "Known limitations") — it only matters at actual deploy time, not for local emulator development, and nothing about it changed this phase.
+
+| # | Suite | Command | Result |
+|---|---|---|---|
+| 1 | Typecheck | `npm run typecheck` | ✅ pass (booking-core, app, functions) |
+| 2 | Lint | `npm run lint` | ✅ pass, 0 errors/warnings |
+| 3 | Production build (frontend) | `npm run build` | ✅ succeeds |
+| 4 | Production build (functions) | `npm run build:functions` | ✅ succeeds |
+| 5 | Unit tests | `npm run test:unit` | ✅ 49/49 (21 booking-core + 28 app — unchanged; this phase added no new pure-logic unit tests, all new coverage is integration-level, below) |
+| 6 | **Backend emulator + rules tests** | isolated-port run (see below) | ✅ **75/75** — see "Verification completion" below for the corrected, audited breakdown (the counts first written here were wrong) |
+| 7 | Browser tests, fixture mode | `npm run test:e2e` | ✅ 6/6, unaffected |
+| 8 | **Browser tests, real emulator** | isolated-port run (see below) | ✅ **12/12** at the time this phase was first reported (now 13/13 — see "Verification completion" below) |
+| 9 | Dev server (not just production build) | manual check, live preview emulator, read-only | ✅ `/staff` shows the new "+ New manual booking" link; `/staff/new-booking` renders the full form with real catalog data, no console errors. **Not submitted**, to avoid writing test data into your running preview's saved emulator data. |
+
+**Every explicitly required test scenario, and where it's proven** (all in `functions/tests/manualBooking.emulator.test.ts` unless noted):
+
+| Requirement | Result |
+|---|---|
+| Guests and no-role users are rejected | ✅ `unauthenticated` / `permission-denied`, incl. `role: "owner"` tampering in the payload having no effect |
+| Staff and Owner can create valid manual reservations | ✅ both roles, confirmed/unpaid, server-assigned room, correct price |
+| Role, price, capacity, date, Party tampering rejected | ✅ tampered `totalAmountMinor` ignored (server recomputes); over-capacity, past date, non-public time, `packageId: "party"`, and an unknown `source` value all rejected |
+| Manual booking vs. online hold for the last matching room | ✅ each direction tested (online-first blocks manual, manual-first blocks online) *and* a true concurrent race (`Promise.allSettled`) resolves to exactly one winner |
+| Simultaneous manual requests cannot overbook | ✅ 2 concurrent requests on a 1-room package → exactly 1 succeeds; 4 concurrent on a 3-room package → exactly 3 succeed |
+| Expired holds release capacity; adjacent sessions valid | ✅ a backdated online hold's slot becomes bookable again by a manual request; two adjacent manual sessions on the same single room both succeed |
+| Retry creates one booking, one audit event | ✅ exact-key-and-payload retry returns the identical booking (checked via a direct Firestore query — exactly 1 booking doc, exactly 1 audit doc); same key with a different payload is rejected (`already-exists`), never silently served |
+| Failed operations leave no partial writes | ✅ a sold-out attempt leaves the inventory interval count and the audit-log document count both unchanged |
+| Manual reservations remain occupied beyond 10 minutes | ✅ direct Firestore check: the interval has `status: "confirmed"`, `holdExpiresAtMillis: null` — contrasted against a real online hold on an adjacent slot, backdated 15 minutes, which *does* release, proving the manual booking's permanence isn't just "hasn't expired yet" |
+| Public responses expose no customer details | ✅ `getAvailability` after a manual booking scanned for the customer's name/phone/`bookingId` — none present; response shape unchanged (`time`/`status`/`roomsFree`/`roomsTotal` only) |
+| Direct client writes remain denied | ✅ `firestore.rules.test.ts` — new assertions for `manualBookingIdempotency` and `auditLog`, including with a **staff/owner-claimed** token (defense-in-depth, matching the existing pattern for `bookings`/`inventory`) |
+
+**Playwright browser verification (`app/e2e/manualBooking.emulator.spec.ts`, 4 tests, real Playwright `test.use({viewport})` — desktop 1280×800, mobile 390×844):** the full form→review→confirm flow at desktop, ending with the created booking visible on `/staff` (time, customer name, "Unpaid" badge, "Confirmed" status badge) *and* the same date/package/time now showing as a disabled ("full") slot on the public `/book` wizard — proving the staff-created booking actually blocks public availability, not just that it appears on the schedule; the same flow at 390px; and a Sinhala-locale render check of the form.
+
+#### Isolated emulator test infrastructure (new, reusable)
+
+The backend and browser test suites above needed the local Firebase Emulator Suite, but your preview emulator was already running on the default ports with your own saved data — reusing it (or its ports) was off-limits this phase. Added:
+
+- **`firebase.test.json`** — a second emulator config, ports offset from the defaults (Auth 9199, Firestore 8180, Functions 5101, plus isolated hub/logging/eventarc/tasks ports). Never touched by any existing script; only used when explicitly passed via `--config`.
+- **`functions/tests/testEmulatorPorts.ts`** (new, not a test file — no `describe`/`it`) — the 4 backend emulator test files now read their target ports from `TEST_AUTH_EMULATOR_PORT`/`TEST_FIRESTORE_EMULATOR_PORT`/`TEST_FUNCTIONS_EMULATOR_PORT` env vars, defaulting to the real ports (9099/8080/5001) unchanged — so `npm run test:emulators`/`test:e2e:emulator` behave exactly as before when no override is set.
+- **`app/src/lib/env.ts`**'s `env.emulatorPorts` — same idea for the frontend build: `VITE_FIREBASE_EMULATOR_{AUTH,FIRESTORE,FUNCTIONS}_PORT`, defaulting to 9099/8080/5001. `app/src/lib/firebase/client.ts` now reads these instead of a hardcoded constant.
+- **`TEST_PROJECT_ID`** (also in `testEmulatorPorts.ts`, default `"demo-apex-cinema"`) — **required**, not just the ports. Firebase's emulator hub coordinates same-project-id instances via a locator keyed by project id, independent of port config; running two `firebase emulators:exec`/`emulators:start` instances for the same project id prints "running multiple instances... this may result in unexpected behavior" and, confirmed by direct testing, is not just a warning — client SDK calls can silently reach the *other* instance regardless of distinct ports. An isolated run therefore needs `--project demo-apex-cinema-test` (or any other `demo-`-prefixed id) as well as its own ports.
+- **A second, real bug found via this same investigation**: `firebase emulators:exec` (used by the normal `test:emulators`/`test:e2e:emulator` scripts) was unreliable specifically for a *second, isolated* instance in this environment — tests failed almost instantly with `auth/user-not-found` even with correct env vars and a fully separate project id, while the exact same seed+test commands run directly against an `emulators:start`-launched background instance (no `exec` wrapper) passed 75/75 every time. Root cause not fully isolated (likely a timing/readiness race specific to `exec`'s process-wrapping in this sandboxed environment); the reliable workaround — start in the background, poll for "All emulators ready", seed and test as plain commands, then stop the process — is what every verification run above actually used. Flagged here rather than left as an unexplained flake; the default (non-isolated) `test:emulators`/`test:e2e:emulator` scripts are untouched and still use `emulators:exec` as before.
+
+#### How to preview locally (unchanged routes/credentials from Phase 4)
+
+```sh
+npm run seed:emulator                          # one-time (or reset): catalog + owner/staff auth accounts
+npm run emulators:seeded                       # terminal 1
+VITE_DATA_MODE=emulator npm run dev --workspace app   # terminal 2
+```
+
+Sign in at `/staff/login` as Owner (`owner@apexcinema.test` / `LocalOwner!123`) or Staff (`staff@apexcinema.test` / `LocalStaff!123`). From `/staff`, click **"+ New manual booking"** (or go directly to `/staff/new-booking`) to record a walk-in or phone reservation.
+
+**To run this phase's new tests yourself against an isolated, non-conflicting emulator** (safe to run alongside a separately-running preview on the default ports):
+
+```sh
+# Terminal 1 — isolated emulators (own ports + own project id)
+export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"   # if java isn't found — see Environment notes above
+firebase --config firebase.test.json --project demo-apex-cinema-test emulators:start --only auth,firestore,functions
+# wait for "All emulators ready!"
+
+# Terminal 2 — seed, then run the backend suite
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:8180 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9199 GCLOUD_PROJECT=demo-apex-cinema-test
+export TEST_PROJECT_ID=demo-apex-cinema-test TEST_AUTH_EMULATOR_PORT=9199 TEST_FIRESTORE_EMULATOR_PORT=8180 TEST_FUNCTIONS_EMULATOR_PORT=5101
+npm run seed:emulator --workspace functions && npm run seed:auth --workspace functions
+npm run test --workspace functions
+
+# Then the browser suite (same terminal/env), against a build pointed at the isolated ports
+VITE_DATA_MODE=emulator VITE_FIREBASE_EMULATOR_HOST=127.0.0.1 \
+VITE_FIREBASE_EMULATOR_AUTH_PORT=9199 VITE_FIREBASE_EMULATOR_FIRESTORE_PORT=8180 VITE_FIREBASE_EMULATOR_FUNCTIONS_PORT=5101 \
+VITE_FIREBASE_PROJECT_ID=demo-apex-cinema-test npm run build --workspace app
+cd app && npx playwright test --grep @emulator
+
+# When done, stop the isolated emulator (Ctrl-C / kill the process from terminal 1) — your
+# separately-running preview emulator and its ./emulator-data are never touched by any of this.
+```
+
+#### Files changed
+
+`functions/src/createManualBooking.ts` (new), `functions/src/index.ts` (export), `functions/src/lib/{inventory,reference,schedule,validation,firestore}.ts` (edited; `auth.ts` unchanged), `functions/tests/manualBooking.emulator.test.ts` (new, 26 tests), `functions/tests/testEmulatorPorts.ts` (new), `functions/tests/{ping,inventory,staffAuth,firestore.rules}.emulator.test.ts` (port/project-id parameterized only — test counts otherwise unchanged; firestore.rules.test.ts +2 assertions, 12→14), `packages/booking-core/src/types.ts` (`PaymentStatus` +`"unpaid"`); `firestore.rules` (+2 explicit deny blocks); `app/src/routes/staff/NewManualBooking.tsx` (new), `app/src/components/staff/{ManualBookingForm,ManualBookingReview}.tsx` (new), `app/src/lib/manualBookingValidation.ts` (new), `app/src/data/firebase/staffApi.ts` (createManualBooking + types + paymentStatus field), `app/src/routes/staff/StaffSchedule.tsx` (new-booking link, Unpaid badge, `?date=` query param), `app/src/App.tsx` (route), `app/src/i18n/translations.ts` (`staff.manualBooking.*` + `staff.newBookingLink`/`staff.unpaidBadge`, both languages), `app/src/lib/env.ts` + `app/src/lib/firebase/client.ts` (isolated-port env overrides), `app/src/lib/firebase/client.test.ts` (mock updated for the new `emulatorPorts` field); `app/e2e/manualBooking.emulator.spec.ts` (new, 3 tests — desktop/390px/Sinhala) plus 1 more added in the verification-completion pass below (conflict/race); `app/e2e/functionsEmulator.ts` (new, verification-completion pass); `firebase.test.json` (new); `docs/ARCHITECTURE.md`, `docs/DECISIONS.md` (this phase's additions). **Test-count reconciliation for this "Files changed" line and the report below it is in the verification-completion pass — see there for the exact, audited numbers; the counts originally written when this phase was first reported were wrong (see that pass for why).**
+
+#### Known limitations / honest gaps
+
+- No cancellation, extension, payment collection, or Party manual entry — all explicitly out of scope this phase, as instructed.
+- ~~The "preserve entered details when a slot becomes unavailable" requirement... wasn't independently exercised by an automated browser test this phase~~ — **closed in the verification-completion pass below**: a dedicated real-race browser test now exists and passes.
+- ~~The root cause of `firebase emulators:exec` being unreliable for a second, isolated instance... wasn't fully diagnosed~~ — **still not root-caused**, but no longer just "worked around once": the `emulators:start`-in-background approach was used consistently across every run in the verification-completion pass too (backend and browser, multiple fresh restarts), so it's a confirmed-reliable substitute, not a one-off. If the *default*-port `test:emulators`/`test:e2e:emulator` scripts (which still use `emulators:exec`, unmodified) ever show the same symptom, that would need fresh investigation — they haven't been observed to.
+- ~~Node mismatch (v26.5.0 vs. the project's target 22)~~ — **addressed in the verification-completion pass below**: an unlinked `node@22` keg now exists on this machine specifically so Node-22 verification runs are possible without changing the linked/global `node`. See that section for an important caveat: fixing an unrelated breakage this caused did end up changing the global `node` version (not intentionally, not to a different major version).
+- Carried forward, unchanged: the `client`/Firebase-SDK bundle-size tradeoff from Phase 3 (~482 kB raw / ~143 kB gzip); Owner MFA still not implemented (needs Identity Platform + Blaze billing approval).
+
+#### Verification completion pass (2026-09-20, after the phase above was first reported)
+
+Requested before committing: reconcile the test-count numbers above (they didn't add up), re-run the manual-booking-relevant builds/tests under the project's target Node 22, and add a real regression test for a staff/owner conflicting with another request for the last matching room mid-submission. All three below; nothing else in the phase above changed (no feature work).
+
+**1. Test-count reconciliation — the numbers above were wrong; here is the audited, correct breakdown.**
+
+Compared every test file byte-for-byte against `main` (`git diff main -- <file>`) to get exact, verifiable counts rather than re-estimating:
+
+| | Backend (`functions/tests`) | Browser (`app/e2e`) |
+|---|---|---|
+| **Baseline on `main`** (before this phase) | 47 — `ping.unit`:1, `ping.emulator`:1, `inventory.emulator`:19, `staffAuth.emulator`:14, `firestore.rules`:12 | 9 — `emulator.spec`:1, `staffAuth.emulator.spec`:8 |
+| **Changed this phase** | `firestore.rules.test.ts` +2 assertions (12→14); new `manualBooking.emulator.test.ts` file, **26** tests (not "14" as originally reported — that number was simply wrong, possibly confused with `staffAuth`'s own count of 14). `ping.emulator`/`inventory.emulator`/`staffAuth.emulator` were **not** modified in test count or behavior — `git diff` against `main` shows only a `testEmulatorPorts.ts` import + `TEST_PROJECT_ID`/`EMULATOR_PORTS.*` substituted for hardcoded `"demo-apex-cinema"`/port literals, nothing else. | New `manualBooking.emulator.spec.ts` file, **3** tests (desktop / 390px / Sinhala) — not "4" as originally reported (that "+1" was a stray, uncounted-for padding artifact, not a real fourth test at the time). `emulator.spec.ts`/`staffAuth.emulator.spec.ts` are **byte-identical** to `main` (`git diff` empty) — genuinely untouched. |
+| **New total** | 47 + 26 + 2 = **75** ✅ matches the reported figure | 9 + 3 = **12** ✅ matches the reported figure (at the time) |
+
+So the *totals* (75 and 12) were correct — only the prose describing how they were reached ("14 new", "4 new") was wrong. No test was modified to make a number match; the reconciliation above is a read of what already existed. One pre-existing test (`manual reservations never expire > remains occupied...`) *was* rewritten mid-phase — not to hit a count, but because its original version raced two requests for the same single-room package/date/time against each other, making the second request fail for an unrelated reason (a real bug in the test's own design, not the feature); it still counts as 1 of the 26, unchanged in count, corrected in behavior — see the file's own comment for the before/after.
+
+This section's own new test (§3 below) adds one more to each: backend stays at 75 (no new backend test was needed — the scenario is inherently a browser-level race between two real HTTP requests around a UI submission), browser goes **12 → 13**.
+
+**2. Verification under Node 22 (the project's actual target).**
+
+This machine's linked/global Node was v26.5.0 (functions/package.json targets **22**). To get a real Node 22 without relinking or replacing the global install, installed the `node@22` Homebrew formula, which is **keg-only by design** — Homebrew does not symlink it into `/opt/homebrew/bin` when another `node` is already linked, and it wasn't force-linked. Verified: `brew install node@22` printed "was installed but not linked because node is already linked", and immediately after, `which node` still resolved to the pre-existing linked keg.
+
+**Important, unintended side effect — reported in full rather than omitted:** installing `node@22` upgraded a shared dependency (`simdutf`) that an *unrelated* already-installed Homebrew package (`merve`, a small CommonJS-export-lexer library that Node's own tooling depends on) was dynamically linked against. Immediately after, the linked/global `node --version` started crashing (`dyld: Library not loaded ... libsimdutf.34.dylib`, exit code 134) — a real, if narrow, disruption to the global Node installation that was not requested and is called out here rather than left unmentioned. The only fix was `brew upgrade merve`, which Homebrew cascaded into also upgrading the linked `node` formula itself (**26.5.0 → 26.9.0** — a patch-level bump within the same major version, not a downgrade, not a major-version change, and not something that was asked for or intended). The old 26.5.0 keg was removed by Homebrew's own cleanup step as part of that upgrade, so an exact revert back to 26.5.0 isn't cleanly possible after the fact. Confirmed afterward: global `node --version` → `v26.9.0`, exits cleanly; `node@22` → `v22.23.2`, exits cleanly; the running preview's Firebase emulator (PID unchanged) and Vite dev server (PID unchanged) were never restarted or otherwise affected by any of this — a live process doesn't need to reload a shared library it already has open.
+
+With `node@22`'s bin directory placed first on `PATH` for these commands specifically (never exported globally/persistently — this repo's `.zshrc`/shell profile was not touched):
+
+- `npm run build --workspace packages/booking-core` and `npm run build --workspace functions` — ✅ succeed under `node --version` → `v22.23.2`.
+- The isolated Functions emulator's own log line changed from every prior run's `⚠ functions: Your requested "node" version "22" doesn't match your global version "26". Using node@26 from host.` to **`✔ functions: Using node@22 from host.`** — confirming the emulator process itself, not just the CLI wrapping it, now runs the functions under Node 22.
+- The backend test runner (`npx vitest run` inside `functions/`) — confirmed via an inline `console.log(process.version)` immediately before invoking it in the same shell — also resolved to **v22.23.2**.
+- Full backend suite re-run fresh under this configuration: **75/75**.
+- Frontend build (`npm run build --workspace app`, `VITE_DATA_MODE=emulator`) and the full emulator-mode Playwright suite were also run with `node@22` first on `PATH` (Playwright's own orchestration process is Node; the actual browser automation itself runs in Chromium, unaffected by Node version either way) — **13/13** (see §3).
+
+**3. New regression test — a real conflict between a staff submission and a competing request for the last matching room.**
+
+Added `app/e2e/manualBooking.emulator.spec.ts` › **"a competing request takes the last matching room between review and confirm — staff sees a conflict, keeps their details, and retries successfully on another slot"** (`app/e2e/functionsEmulator.ts`, new, builds the direct callable-HTTP URL used to fire the competing request):
+
+1. Staff fills the manual-booking form for **AC Small** (room-4 — the package's *only* physical room, so any competing booking for the same date/time unambiguously takes "the last matching room") and reaches the review step.
+2. While still on review (before clicking Confirm), the test fires a **real, separate HTTP request** directly at the `createHold` callable's emulator endpoint (Playwright's `request` fixture, bypassing the UI entirely) — a genuine competing guest hold for the identical package/date/time, not a mock or simulated response.
+3. Staff clicks **Confirm** — asserts the actual server-returned conflict message is shown (`"That room is no longer available for this date and time — pick another slot. Your details have been kept."`), and explicitly asserts **no false success**: `getByText("Booking confirmed")` and the `APX-` reference pattern both have `toHaveCount(0)`.
+4. Asserts the customer's name is still visible right there on the review screen (nothing was cleared by the failed submission), then clicks "Edit details" and asserts the name/phone **form inputs** still hold their original values.
+5. Picks a different, uncontended time (12:00) on the same package, reviews, and confirms again — asserts this one **actually succeeds**: a real "Booking confirmed" status, a real `APX-` reference, the correct room.
+
+Result: ✅ **passed on the first run**, and again on the final fully-fresh combined run below — no code changes were needed to make it pass; it validates behavior the implementation already had (the catch block in `NewManualBookingBody.handleConfirm` never touches `form` state), but this is now machine-verified rather than only reasoned through.
+
+**Final combined re-run, fully fresh (isolated emulator stopped and restarted clean, re-seeded, before each), under Node 22 throughout:**
+
+| Suite | Result |
+|---|---|
+| Backend emulator + rules tests (`functions`) | ✅ **75/75** |
+| Browser tests, real emulator (`app/e2e`, `--grep @emulator`) | ✅ **13/13** (12 from before + the 1 new conflict/race test) |
+| Typecheck / Lint | ✅ pass (re-run after adding the new spec + helper file) |
+
+Isolated emulator processes were stopped cleanly after every run (confirmed via `ps`/port checks); the running preview emulator (PID unchanged throughout this entire pass) and its `./emulator-data` were never imported from, exported to, or otherwise touched. Synthetic test data only (`Race Condition Test` / `Competing Guest`, fictional phone numbers, dates 20+ days out) — none of it reached the preview's saved data.
+
+**Remaining limitations after this pass:**
+- The `firebase emulators:exec`-unreliable-for-a-second-instance issue is still not root-caused (see above) — a confirmed-reliable workaround, not a fix.
+- The unintended global Node patch-version bump (26.5.0 → 26.9.0, described in full above) cannot be cleanly reverted — flagging for your awareness, not attempting a further change to fix it without being asked.
+- Same feature-scope limitations as before this pass: no cancellation/extension/payment/Party.
+
+#### Bug-fix pass (2026-09-20, after the verification-completion pass above): blank Package area on `/staff/new-booking`
+
+**Reported symptom** (from screenshots of the running preview): the "Package" label appeared with no selectable packages beneath it; "Tomorrow" was a valid selected date; "Start time" stayed on "Choose a package and date first."; clicking through to review showed "Choose a package." / "Choose a start time." with no way to ever select a package.
+
+**Investigation, in the order actually done:**
+1. Found the live preview's emulator supervisor process had died (only an orphaned Firestore-only process remained; Auth/Functions were both unreachable). Restored it via `npm run emulators:seeded`, re-importing the *same* `./emulator-data` (verified unchanged before/after: same `roomTiers` catalog, same 0 bookings) — a restore of a crashed process, not a reset. Re-seeded only the two staff/owner **auth** accounts (missing because the saved `auth_export` snapshot predates when they were originally created) via the existing `seedAuthUsers.js` script — idempotent, touches only those two accounts, never Firestore.
+2. Confirmed the catalog was **not** missing: `roomTiers` has all 4 correct docs (3 standard + Party) with correct prices/capacities/`isBookableOnline` flags — ruling out a data problem before touching anything.
+3. Confirmed `functions/src/getPackages.ts` and `app/src/data/firebase/packagesAdapter.ts` are both simple, correct, and unmodified — ruling out the backend/adapter.
+4. Reproduced the healthy path twice (full page load and SPA client-side navigation to `/staff/new-booking`) — **packages rendered correctly both times**, disproving "always broken" and disproving a timezone bug (per your explicit instruction not to assume one — date/time logic was never involved in the actual cause).
+5. Root cause found by reading `app/src/routes/staff/NewManualBooking.tsx`: `usePromise(() => packagesAdapter.listPackages(), [])` was destructured as `const { data: packages } = usePromise(...)` — **`loading` and `error` were discarded**. Every *other* `usePromise` call site in the app (`Home.tsx`, `Packages.tsx`, `DateTimeStep.tsx`) reads and renders `loading`/`error`; this was the only one that didn't. Confirmed live: patched `window.fetch` in the running preview's browser tab to reject only the `getPackages` call (a real rejected promise, not a mock UI state) — the page rendered a bare "Package" label with **zero** radio options, **zero** console output, **zero** error UI, exactly reproducing every symptom in the report (Start time stuck on "choose a package and date first", Review blocked with "Choose a package."/"Choose a start time."). This is consistent with the emulator-down state found in step 1: any failed/unavailable `getPackages` call — Functions emulator down, a slow cold start, a transient network error — hits this same silent path.
+
+**Fix** (`app/src/routes/staff/NewManualBooking.tsx`, `app/src/components/staff/ManualBookingForm.tsx`, `app/src/i18n/translations.ts`):
+- `NewManualBookingBody` now reads `loading`/`error` from the packages `usePromise` (previously discarded), plus a `packagesRetryKey` state included in its dependency array so a retry can re-run the fetch without remounting the route or touching any other state.
+- `ManualBookingForm` renders three explicit states in the Package section instead of the previous single always-empty-or-full fieldset: **loading** ("Loading packages…"), **error** (translated message + a "Try again" button), **empty** (packages loaded but zero bookable ones — same "Try again" affordance, in case the catalog is transiently misconfigured), and only then the normal package cards.
+- "Review booking" is now `disabled` whenever packages are loading, errored, or empty (mirrors the existing `DateTimeStep`/public-booking convention of disabling "Continue" under the same conditions) — `handleReview()` also short-circuits defensively for the same condition, so review can never be reached with an unusable package list.
+- Customer-entered fields (name/phone/etc.) live in the parent's `form` state, untouched by the packages retry — verified live (see below), not just by code reading.
+- New translation keys (`staff.manualBooking.packagesLoading`/`packagesErrorBody`/`packagesEmptyBody`) added to **both** `en` and `si`; the existing `common.retry` ("Try again" / "නැවත උත්සාහ කරන්න") key is reused for the button. `npm run test --workspace app` includes the i18n parity check (both dictionaries typed against the same shape) — still passes.
+- Party remains excluded (unchanged — `ManualBookingForm` still filters to `isBookableOnline`); availability slots (09:00/12:00/15:00/18:00, Asia/Colombo) are unchanged — this bug was entirely in the packages fetch, not availability.
+
+**Manually verified live in your running preview** (no data written — `Confirm booking` was never clicked): with `getPackages` patched to fail, the Package section showed the translated error + "Try again" instead of a blank area; "Start time" showed the existing "choose a package and date first" copy; "Review booking" was confirmed `disabled` via a direct DOM check. Typed a customer name/phone during the failure, clicked "Try again" — packages loaded (all 3 standard packages, correct prices, Party excluded), and the typed name/phone were still there. Continued through package → Tomorrow → all 4 slots showing "Available" (Asia/Colombo) → people count → "Review booking" → reached the real review screen with the correct price/date/time/customer details. Repeated the loading-state check in Sinhala (`Package load කරමින්…` visible momentarily on a fresh load) — did not exhaustively re-run the full Sinhala flow interactively (relied on the automated Sinhala regression test + i18n parity check for that language, both passing) after an unrelated browser-automation quirk (a stale element reference on one click) made further manual Sinhala clicking unreliable; not a product issue — no console errors, no app misbehavior were observed.
+
+**New regression test** — `app/e2e/manualBooking.emulator.spec.ts` › **"a failed packages fetch shows an explicit error with Retry — never a silently blank Package area — and Retry recovers the flow without losing entered details"**: routes (Playwright `page.route`) the *first* `getPackages` call to `route.abort("failed")` — a real aborted request, not a mocked UI state — then asserts the translated error text and "Try again" are visible, zero package radios exist, "Choose a package and date first." still shows for Start time, "Review booking" is disabled; fills customer name/phone, clicks "Try again", asserts packages now render and the typed details survived; completes the full package → slot → review flow and asserts the review screen shows the correct customer name. Backend: no new backend test needed — this bug and fix are entirely frontend (the failure path is a client-side fetch rejection, not a server behavior change).
+
+**Test results — isolated emulator (own ports + `demo-apex-cinema-test` project id, per the established `emulators:start`-in-background workflow), single fully-fresh pass, all env vars held in one shell throughout:**
+
+| Suite | Result |
+|---|---|
+| Backend (`functions`) | ✅ **75/75** — unchanged, this bug/fix never touched backend code |
+| Browser, real emulator (`app/e2e --grep @emulator`) | ✅ **14/14** (13 from before + the 1 new packages-fetch-failure test) |
+| `npm run typecheck` (booking-core + app + functions) | ✅ pass |
+| `npm run lint` (root `eslint .`) | ✅ pass |
+| `npm run test:unit` (booking-core: 21, app: 28 — includes i18n parity) | ✅ **49/49** |
+| `npm run build` (booking-core + app) and `npm run build:functions` | ✅ both succeed |
+
+One self-inflicted false alarm during this pass, reported for transparency: re-running the suite in **separate** shell invocations without re-exporting `TEST_PROJECT_ID`/`TEST_FUNCTIONS_EMULATOR_PORT` in each one caused the conflict/race test's direct HTTP call to silently fall back to the *default* (non-isolated) project/port — i.e., it would have hit your live preview's Functions emulator, not the isolated one. Checked immediately: the request was cleanly rejected (non-2xx) before writing anything — a direct read of the live preview's `holds`/`bookings`/`manualBookingIdempotency`/`holdIdempotency`/`auditLog` collections via the Firestore emulator's REST API confirmed 0 documents in every one, matching the pre-existing state. Re-ran with all env vars held in a single shell for the rest of this pass; no further occurrences. The isolated emulator was stopped after every run (confirmed via port checks); the running preview emulator and its `./emulator-data` were never imported from, exported to, or otherwise touched by this entire pass.
+
+**Known limitations / honest gaps after this pass:**
+- The "empty" package state (catalog loads successfully but has zero bookable packages) is implemented and translated but has no dedicated automated test — only the loading/error/retry path (the actually-reported bug) has one. Worth a follow-up test if the catalog's `isBookableOnline` flags are ever expected to change at runtime.
+- Manual interactive verification of the new states in Sinhala was partial (see above) — the automated Sinhala regression test and the i18n parity check both pass, but the loading/error/retry states specifically were not interactively re-verified in Sinhala beyond the momentary loading-state check.
+- No code outside this bug's actual cause was touched — availability, review, confirm, and the conflict/race path are all unchanged and still pass their existing tests.
+
+#### Follow-up fix (2026-09-21): the test-isolation fallback disclosed in the bug-fix pass above
+
+The bug-fix pass above disclosed, as a "self-inflicted false alarm," that `app/e2e/functionsEmulator.ts`'s `callableUrl()` silently defaulted `TEST_PROJECT_ID`/`TEST_FUNCTIONS_EMULATOR_PORT` to the live preview's own project id (`"demo-apex-cinema"`) and port (`5001`) whenever they weren't explicitly exported in the shell running Playwright — so a forgotten `export` in one of several separate shell invocations pointed the conflict/race test's direct HTTP call at whatever was actually listening on those coordinates (in that case, the live preview emulator itself). The request was rejected that time and nothing was written, but nothing in the code prevented it from succeeding. Requested before committing: eliminate the fallback entirely, require explicit validated isolated configuration, fail before any network request, and prove it.
+
+**What was inspected first:** `app/e2e/functionsEmulator.ts` (the disclosed file) and everything it depends on for isolation — `playwright.config.ts` (serves `app/dist`, built with `VITE_FIREBASE_*` baked in at `vite build` time — a **separate** source of truth from `functionsEmulator.ts`'s `TEST_*`, read fresh from `process.env` at Playwright run time, set via a **separate** shell command per the documented runbook), and `functions/tests/testEmulatorPorts.ts` (the backend suite's equivalent port/project reader).
+
+**Root cause, precisely:** `callableUrl()` used `process.env.TEST_PROJECT_ID ?? "demo-apex-cinema"` and `process.env.TEST_FUNCTIONS_EMULATOR_PORT ?? "5001"` — by design, so the same helper could serve both the manual isolated workflow (with `TEST_*` set) and the automated `test:e2e:emulator` root script (`firebase emulators:exec` with no `--config`/`--project` override, which spins up an ephemeral instance on those exact same default coordinates and tears it down after). Those two "default" cases are **not the same thing** — one is a safe, ephemeral, exclusively-owned instance; the other is the developer's always-on live preview — but the code couldn't tell them apart, and nothing distinguished "config omitted on purpose for the ephemeral-exec flow" from "config omitted by mistake while a live preview happens to be listening on the identical coordinates."
+
+**Fix — `app/e2e/isolatedEmulatorConfig.ts` (new):**
+- `getIsolatedEmulatorConfig()` reads `TEST_PROJECT_ID` + `TEST_AUTH_EMULATOR_PORT`/`TEST_FIRESTORE_EMULATOR_PORT`/`TEST_FUNCTIONS_EMULATOR_PORT` from `process.env` with **zero fallback of any kind** — every one of the four is required, or it throws synchronously, before returning anything.
+- Beyond "missing," it actively rejects values that *are* the live preview's own known coordinates: `TEST_PROJECT_ID === "demo-apex-cinema"` is rejected outright (not just when defaulted — explicitly setting it to that value is rejected too, since the danger is the coordinate, not how it was set); each port matching its corresponding preview port (9099/8080/5001) is rejected the same way; `TEST_PROJECT_ID` must match `/^demo-[a-z0-9-]+$/` (a real, if minimal, "is this even an emulator-safe id" check); the three ports must be mutually distinct.
+- `assertLoopbackEmulatorUrl(url, expectedPort)` parses the constructed URL and asserts `http:` + `127.0.0.1`/`localhost` + the exact expected port — an explicit, testable assertion on the endpoint actually being loopback, not just an assumption baked into a template string.
+- `callableUrl()` (`functionsEmulator.ts`) calls the validator first; if it throws, the function never returns a URL, so a caller's `request.post(callableUrl(...), ...)` never evaluates its second argument or performs any request — "fail before any network request" is a direct consequence of synchronous-throw-before-return, not a separate mechanism that could itself have a gap.
+
+**"Ensure the test helper and browser test configuration target the same isolated environment":** the two sources of truth (`TEST_*` read by Node at test-run time; `VITE_FIREBASE_*` baked into the build at build time) genuinely cannot be statically unified across two separate shell commands without merging those commands into one (out of scope — that's the existing documented two-step runbook, "do not change global tooling"). Added `assertPageTargetsIsolatedFunctions(page)` instead: a **runtime** proof, wired into the conflict/race test (`manualBooking.emulator.spec.ts`), that waits for the first real Functions-emulator request the *browser page itself* makes and asserts its URL matches the exact project id + port `callableUrl()` computed from `process.env` — i.e., it proves both sides actually agree in that specific run, not just that each one independently looks valid.
+
+**A second, real bug found and fixed while adding tests for this:** the new Vitest unit tests live in `app/e2e/isolatedEmulatorConfig.test.ts` (Node environment, not jsdom) — but `app/e2e/**` was entirely excluded from Vitest's config (`exclude: ["e2e/**"]`, added when `app/e2e/*.spec.ts` were introduced, to keep Vitest from trying to load Playwright's own test files). Narrowed `vite.config.ts`'s test `include`/`exclude` to `e2e/**/*.test.ts` / `e2e/**/*.spec.ts` respectively so the two runners' files are unambiguously separated by suffix. This alone would have let **Playwright** pick up the new `*.test.ts` file too (its default glob matches `*.test.ts` *and* `*.spec.ts`) — confirmed by `npx playwright test --list` actually failing with "Vitest failed to find the runner" while trying to load `isolatedEmulatorConfig.test.ts`, which would have broken `npm run test:e2e`/`test:e2e:emulator`. Fixed by adding `testMatch: /.*\.spec\.ts$/` to `playwright.config.ts`, scoping it to its own existing naming convention. Re-verified after: `npx playwright test --list` → the same 20 tests across the same 4 `.spec.ts` files as before, 0 errors.
+
+**`functions/tests/testEmulatorPorts.ts` was deliberately left unchanged.** It has the same-shaped `?? "demo-apex-cinema"` / `?? 8080` etc. fallback, but it is **not** the same hazard: it's read by the backend Vitest suite, whose two legitimate flows are (a) `emulators:exec`-wrapped (`test:emulators`/`test:e2e:emulator`), where the default coordinates are safe *by construction* — `emulators:exec` spins up its own ephemeral instance on those ports for the command's duration only, and if a live preview is already bound to those same ports, `emulators:exec` fails to start at all (`EADDRINUSE`) rather than silently reusing the preview — and (b) the same manual isolated workflow, where the runbook already requires exporting `TEST_PROJECT_ID`/`TEST_*_PORT` (unchanged, still required, now doubly appropriate). Unlike `app/e2e/functionsEmulator.ts` — which has **no** legitimate default-only use case at all, since it's exclusively used to fire direct HTTP requests from a bare `npx playwright test` invocation outside any `emulators:exec` wrapper — `testEmulatorPorts.ts`'s fallback is load-bearing for a real, safe, unchanged flow. Making it strict too would have meant either breaking `test:emulators`/`test:e2e:emulator` outright or editing those root scripts to pass matching env vars — both out of scope ("do not change global tooling"; the request named `functionsEmulator.ts` and "the isolated test setup" specifically, matching the incident actually disclosed).
+
+**Direct, disclosed consequence for `test:e2e:emulator`:** the root `test:e2e:emulator` script's `firebase emulators:exec` call (no `--config`/`--project` override) provisions an ephemeral instance on the exact same coordinates as the live preview (`demo-apex-cinema` / 9099 / 8080 / 5001) and never exports `TEST_*`. Before this fix, the conflict/race test "worked" there only because its defaults happened to numerically match that ephemeral instance. After this fix, running `npm run test:e2e:emulator` as-is will make that one test fail immediately with a clear `IsolatedTestConfigError` ("Isolated test configuration is missing TEST_PROJECT_ID…") instead of silently succeeding against coordinates that are indistinguishable, by code, from the live preview's. This is the correct behavior per the explicit instruction ("never default to the preview project's ID or its emulator ports" has no carve-out for this flow) but it is a real, intentional behavior change to that script's outcome, flagged here rather than fixed silently — fixing it would mean passing `firebase.test.json`-equivalent isolated coordinates through that script too, which touches root tooling and wasn't requested.
+
+**Focused tests added — `app/e2e/isolatedEmulatorConfig.test.ts` (22 tests, Vitest, Node environment):**
+- *Missing/invalid configuration → zero network requests, fails before any request*: every `TEST_*` var missing (individually and all-at-once); `TEST_PROJECT_ID` not `demo-`-prefixed; `TEST_PROJECT_ID` equal to the live preview's own id; each port individually equal to the live preview's own port; malformed ports (`0`, `-1`, non-numeric, out-of-range, non-integer); colliding isolated ports. Each case asserts both the specific thrown error **and** that a `globalThis.fetch` spy recorded zero calls; one case also asserts `callableUrl()` throws *synchronously* (not a rejected Promise), matching how the real test calls it as `request.post(callableUrl(...), ...)` — a synchronous throw during argument evaluation means `request.post` is never reached at all.
+- *Valid isolated configuration works*: a fully valid, preview-distinct config (`demo-apex-cinema-test` / 9199 / 8180 / 5101, matching `firebase.test.json`) round-trips through `getIsolatedEmulatorConfig()` to the exact expected shape and through `callableUrl()` to the exact expected loopback URL string; a second distinct `demo-`-prefixed id is also accepted (proving the check is "not the preview," not "must be this one literal string").
+- `assertLoopbackEmulatorUrl` tested directly: accepts `127.0.0.1`/`localhost` + matching port; rejects a non-loopback host, `https:`, and a mismatched port.
+
+**Verification — Node 22 process-scoped (`/opt/homebrew/opt/node@22/bin` prefixed on `PATH` for these commands only; global `node` untouched):**
+
+| Check | Result |
+|---|---|
+| `npx vitest run e2e/isolatedEmulatorConfig.test.ts` (Node 22) | ✅ **22/22** |
+| `npx vitest run` — full app unit suite (Node 22) | ✅ **50/50** (49 from before + these 22, minus none removed — 7 files total; confirms the new `include`/`exclude` split picked up exactly the one new file, nothing else) |
+| `npm run typecheck` (booking-core + app + functions) | ✅ pass |
+| `npm run lint` (root `eslint .`) | ✅ pass |
+| `npx playwright test --list` | ✅ 20 tests / 4 files — unchanged from before this fix; confirms the Vitest file is correctly excluded from Playwright's own collection |
+| Full isolated-emulator pass: backend | ✅ **75/75** |
+| Full isolated-emulator pass: browser (`--grep @emulator`, valid `TEST_*` set) | ✅ **14/14** — including the conflict/race test now running through `assertPageTargetsIsolatedFunctions`'s live consistency check, and the packages-fetch-failure test from the pass above |
+| **Negative-path proof, live**: same conflict/race test, `TEST_*` deliberately `unset` in the shell | ✅ fails in **961ms** with `IsolatedTestConfigError: Isolated test configuration is missing TEST_PROJECT_ID... No network request was made.` — confirmed via the live preview's `holds`/`bookings` collections (Firestore emulator REST API): 0 documents in both, before and after this run |
+
+Isolated emulator stopped after every run (confirmed via port checks). The live preview emulator was confirmed healthy (auth/firestore/functions all responding) and untouched throughout — never imported from, exported to, reset, or reseeded.
+
+**Known limitations / honest gaps after this fix:**
+- ~~`test:e2e:emulator` will now fail-fast on the conflict/race test when run as-is... not fixed here~~ — **fixed in the checkpoint pass immediately below**, since the user clarified editing this repo's `package.json` scripts and local test config is authorized (only machine-wide Node/Homebrew setup is "global tooling").
+- `functions/tests/testEmulatorPorts.ts` still has a permissive default, kept deliberately (see above) — if its own safe-by-construction assumption (`emulators:exec` always fails to bind already-occupied preview ports) is ever found to not hold in some environment, it would need the same treatment.
+- No product code changed — this entire fix is confined to `app/e2e/*` (test-only files) and `app/vite.config.ts`/`app/playwright.config.ts` (test-runner glob scoping).
+
+#### Checkpoint (2026-09-21): `test:e2e:emulator` fixed to supply consistent isolated config, committed, pushed, PR opened
+
+The fix above deliberately left `npm run test:e2e:emulator` broken-as-disclosed (it never exported `TEST_*`, so it would now fail-fast rather than silently reuse the preview's coordinates) because fixing it meant editing root `package.json`/adding a script, which the previous instructions' "do not change global tooling" left ambiguous. Clarified this session: editing this repo's own `package.json` scripts and local test configuration is in scope — "global tooling" means the machine's Node/Homebrew setup, not this repository's own npm scripts.
+
+**Fix — `scripts/test-e2e-emulator-isolated.sh` (new) + `package.json`'s `test:e2e:emulator` now just runs it:**
+- Defines the isolated project id (`demo-apex-cinema-test`) and ports (9199/8180/5101, matching `firebase.test.json`) in exactly one place, and exports them as both `TEST_*` (for `app/e2e/isolatedEmulatorConfig.ts`) and the standard Admin SDK vars (`FIRESTORE_EMULATOR_HOST`/`FIREBASE_AUTH_EMULATOR_HOST`/`GCLOUD_PROJECT`, for the seed scripts) — so the emulator instance, the seed scripts, the built browser app, and the Playwright test helpers can no longer drift apart across separate shell invocations, which was the root cause of the original incident.
+- Does **not** use `firebase emulators:exec` (what the old script and `test:emulators` use) — per the standing, already-documented finding in this same file ("isolated emulator test ports": `emulators:exec` was found unreliable specifically for a second, isolated instance in this environment, failing almost instantly with `auth/user-not-found` even with fully correct config). Uses the confirmed-reliable substitute instead: `emulators:start` in the background, a readiness poll (up to 120s, checking both "All emulators ready" in the log and that the process is still alive), then seed/build/test as plain foreground commands.
+- `trap cleanup EXIT INT TERM` stops **only the exact PID this script itself started** (tracked via `$!`, `kill -0` liveness-checked before signalling) — never a broad pattern match that could also match the live preview's own `firebase emulators:start ... --import=./emulator-data` process. Runs unconditionally on success, failure, or interrupt.
+- Auto-detects Java (needed by the Auth/Firestore emulators, not linked onto `PATH` by default on this machine) and adds `openjdk@21`'s bin directory to `PATH` **for this script's own subprocess only** if a working `java` isn't already resolvable — never exported globally, never touches the shell profile. If no working Java can be found at all, fails immediately with a clear message rather than silently proceeding.
+- Never imports from, exports to, resets, or reseeds `./emulator-data` (the live preview's persisted data) — the isolated instance is always started with no `--import`/`--export-on-exit` flags, an entirely separate, ephemeral instance.
+
+**Scope of the change:** `package.json` (`test:e2e:emulator` now `bash scripts/test-e2e-emulator-isolated.sh`, one line), `scripts/test-e2e-emulator-isolated.sh` (new), `README.md` (updated the script's description in the scripts table to match). `test:emulators` (backend-only) is untouched — it still uses `emulators:exec` with no isolation, which remains safe for the reasons already documented above (its default-port instance fails to start at all if the preview is already bound to those ports, rather than silently colliding with it).
+
+**Verification — exact documented command, process-scoped Node 22, zero manual environment setup:**
+
+```sh
+export PATH="/opt/homebrew/opt/node@22/bin:$PATH"   # the only PATH change made from outside the script
+npm run test:e2e:emulator
+```
+
+No other env var was set by hand before this command — everything the script needs (`TEST_*`, the Admin SDK vars, `VITE_FIREBASE_*` for the app build, and Java's `PATH` entry if needed) is set inside the script itself.
+
+| Check | Result |
+|---|---|
+| `npm run typecheck` (booking-core + app + functions) | ✅ pass |
+| `npm run lint` (root `eslint .`) | ✅ pass |
+| `npm run test:unit` (booking-core: 21 + app: 50, Node 22) | ✅ **71/71** |
+| `bash -n scripts/test-e2e-emulator-isolated.sh` | ✅ no syntax errors |
+| **`npm run test:e2e:emulator`** (exact command, Node 22, no manual env setup) | ✅ **14/14** — builds core+functions, starts the isolated instance, seeds it, builds the app against it, runs the full `@emulator` Playwright suite, then stops the isolated instance automatically |
+| Isolated ports (9199/8180/5101) after the run | ✅ confirmed free — the script's own cleanup stopped its emulator process |
+| Live preview (auth 9099 / firestore 8080 / functions 5001) before vs. after | ✅ unchanged — all three still responding, healthy |
+| Live preview `holds`/`bookings` collections, before vs. after | ✅ unchanged — 0/0 both times (direct Firestore-emulator REST read) |
+| `./emulator-data/` file timestamps, before vs. after | ✅ unchanged (`Sep 20 13:53`, untouched) |
+
+**Diff review before committing:** read the full `git status`/`git diff` for every file about to be staged. Grepped for API keys, secrets, tokens, and private-key markers — the only matches were the pre-existing, already-established synthetic local-emulator test credentials (`LocalStaff!123`, `LocalOwner!123`, `TestPass!12345`, `apiKey: "demo-api-key"`) used throughout the existing test suite for a `demo-`-prefixed, offline-only emulator project — never real credentials. No `.env`/credential/key files staged. Confirmed `app/dist`, `functions/lib`, `emulator-data`, and `node_modules` all stay gitignored and were not part of the diff. No customer data anywhere — only synthetic test fixtures (already the established convention in every existing `@emulator` test).
+
+**Committed, pushed, PR opened** — commit `7ca1130` on `feature/staff-manual-bookings` (covers this phase's full manual-bookings feature plus both bug-fix passes above — a single checkpoint commit, consistent with this repo's existing phase-level commit granularity), pushed to `origin/feature/staff-manual-bookings`, PR opened into `main`: https://github.com/Madushan186/apex-cinema/pull/1. Not merged (per instruction) — awaiting review.
+
+**Known limitations / honest gaps after this checkpoint:**
+- `test:emulators` (backend-only, `emulators:exec`, unisolated) remains untouched, as before — not in scope, still considered safe for the documented reason.
+- The `emulators:exec`-unreliable-for-isolated-instances root cause is still not diagnosed, only reliably worked around (unchanged from before).
+- This PROGRESS.md update itself landed in a small follow-up commit after the main checkpoint commit (`7ca1130`), rather than being folded into it — noted here rather than silently amending an already-pushed commit.
+
+### Phase 6 — proposed next steps (not started, not approved)
+
+- **6a. Resolve remaining open decisions**: exact deposit amount (#3), party notice definition (#1) and duration (#2), staff-cancellation cutoff (#6) — needed before payment/confirmation, cancellation, or Party manual-entry work.
+- **6b. Staff/owner mutations, part 2**: cancellation (with the D10 restriction), extension approval, and Party (Room 6) manual entry with staff-set start/end time (D2's open duration question) — all through the same inventory transaction pattern, each with its own audit entries.
+- **6c. Payment confirmation**: once the deposit question is answered, a `confirmBooking`-style function transitioning `pending_hold` → `confirmed`, and a way to record an operational (cash/other) payment against a manual booking, transitioning its `paymentStatus` away from `"unpaid"` — still no live PayHere without explicit approval.
+- **6d. Owner MFA**, if/when Identity Platform + Blaze billing is approved.
+- **6e. Lazy-load the emulator adapters** to undo the Phase 3 bundle-size regression, if that becomes a priority before real users see the fixture-mode marketing pages.
 
 Not started until you approve one.

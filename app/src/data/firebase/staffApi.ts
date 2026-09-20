@@ -1,4 +1,5 @@
-import type { PackageId } from "@apex-cinema/booking-core";
+import type { BookablePackageId, PackageId, PaymentStatus, SlotTime } from "@apex-cinema/booking-core";
+import { FirebaseError } from "firebase/app";
 import { httpsCallable } from "firebase/functions";
 import { functions } from "@/lib/firebase/client";
 
@@ -16,6 +17,8 @@ export interface ScheduleBooking {
   readonly customerName: string;
   readonly customerPhone: string;
   readonly referenceCode: string;
+  /** Present only for manual reservations this phase — see docs/DECISIONS.md D14. */
+  readonly paymentStatus: PaymentStatus | null;
 }
 
 export interface ScheduleCounts {
@@ -45,4 +48,81 @@ export async function getStaffSchedule(dateISO: string): Promise<readonly Schedu
 export async function getOwnerOverview(dateISO: string): Promise<ScheduleCounts> {
   const result = await getOwnerOverviewCallable({ dateISO });
   return result.data.counts;
+}
+
+export type ManualBookingSource = "staff_walkin" | "staff_phone";
+
+export interface CreateManualBookingInput {
+  readonly packageId: BookablePackageId;
+  readonly dateISO: string;
+  readonly time: SlotTime;
+  readonly peopleCount: number;
+  readonly name: string;
+  readonly phone: string;
+  /** "" when not given — optional for manual reservations. */
+  readonly email: string;
+  readonly source: ManualBookingSource;
+  /** "" when not given. */
+  readonly staffNote: string;
+  /** Client-generated once per submission attempt; a retry must reuse the same key. */
+  readonly idempotencyKey: string;
+}
+
+export interface ManualBookingResult {
+  readonly bookingId: string;
+  readonly referenceCode: string;
+  readonly roomId: string;
+  readonly totalAmountMinor: number;
+  readonly currency: "LKR";
+  readonly startISO: string;
+  readonly endISO: string;
+  readonly paymentStatus: "unpaid";
+}
+
+/** Discriminated failure reasons the manual-booking form needs to render distinct, honest messages for — same shape as data/types.ts's HoldError. */
+export type ManualBookingErrorReason = "unavailable" | "invalid-request" | "idempotency-conflict" | "unknown";
+
+export class ManualBookingError extends Error {
+  constructor(
+    public readonly reason: ManualBookingErrorReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ManualBookingError";
+  }
+}
+
+function mapManualBookingErrorCode(code: string): ManualBookingErrorReason {
+  switch (code) {
+    case "functions/failed-precondition":
+      return "unavailable";
+    case "functions/invalid-argument":
+      return "invalid-request";
+    case "functions/already-exists":
+      return "idempotency-conflict";
+    default:
+      return "unknown";
+  }
+}
+
+const createManualBookingCallable = httpsCallable<CreateManualBookingInput, ManualBookingResult>(
+  functions,
+  "createManualBooking",
+);
+
+/**
+ * Staff or Owner — see functions/src/createManualBooking.ts. Creates a
+ * CONFIRMED standard-room reservation with paymentStatus "unpaid"; never a
+ * hold, never a paid booking (docs/PROGRESS.md).
+ */
+export async function createManualBooking(input: CreateManualBookingInput): Promise<ManualBookingResult> {
+  try {
+    const result = await createManualBookingCallable(input);
+    return result.data;
+  } catch (error) {
+    if (error instanceof FirebaseError) {
+      throw new ManualBookingError(mapManualBookingErrorCode(error.code), error.message);
+    }
+    throw new ManualBookingError("unknown", "Something went wrong creating this booking. Please try again.");
+  }
 }

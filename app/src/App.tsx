@@ -20,6 +20,9 @@ const StaffSchedule = lazy(() => import("@/routes/staff/StaffSchedule").then((m)
 const OwnerOverview = lazy(() =>
   import("@/routes/staff/OwnerOverview").then((m) => ({ default: m.OwnerOverview })),
 );
+const NewManualBooking = lazy(() =>
+  import("@/routes/staff/NewManualBooking").then((m) => ({ default: m.NewManualBooking })),
+);
 const NotFound = lazy(() => import("@/routes/NotFound").then((m) => ({ default: m.NotFound })));
 
 function RouteFallback() {
@@ -46,6 +49,7 @@ export function App() {
           <Route path="book" element={<Book />} />
           <Route path="staff/login" element={<StaffLogin />} />
           <Route path="staff" element={<StaffSchedule />} />
+          <Route path="staff/new-booking" element={<NewManualBooking />} />
           <Route path="staff/overview" element={<OwnerOverview />} />
           <Route path="*" element={<NotFound />} />
         </Route>

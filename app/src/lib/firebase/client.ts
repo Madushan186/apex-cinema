@@ -31,12 +31,6 @@ import { type Functions, connectFunctionsEmulator, getFunctions } from "firebase
 import { DATA_MODE } from "@/lib/dataMode";
 import { env } from "@/lib/env";
 
-const EMULATOR_PORTS = {
-  auth: 9099,
-  firestore: 8080,
-  functions: 5001,
-} as const;
-
 function createFirebaseApp(): FirebaseApp {
   const existing = getApps();
   if (existing.length > 0) {
@@ -72,11 +66,11 @@ export function connectToEmulatorsIfConfigured(): void {
         "VITE_USE_FIREBASE_EMULATOR=false, or switch DATA_MODE to \"fixture\".",
     );
   }
-  connectAuthEmulator(auth, `http://${env.emulatorHost}:${EMULATOR_PORTS.auth}`, {
+  connectAuthEmulator(auth, `http://${env.emulatorHost}:${env.emulatorPorts.auth}`, {
     disableWarnings: true,
   });
-  connectFirestoreEmulator(firestore, env.emulatorHost, EMULATOR_PORTS.firestore);
-  connectFunctionsEmulator(functions, env.emulatorHost, EMULATOR_PORTS.functions);
+  connectFirestoreEmulator(firestore, env.emulatorHost, env.emulatorPorts.firestore);
+  connectFunctionsEmulator(functions, env.emulatorHost, env.emulatorPorts.functions);
   emulatorsConnected = true;
 }
 

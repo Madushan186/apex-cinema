@@ -35,7 +35,11 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
-    include: ["src/**/*.test.{ts,tsx}"],
-    exclude: ["e2e/**"],
+    // e2e/**/*.test.ts are plain Vitest unit tests for e2e test-support
+    // code (e.g. isolatedEmulatorConfig.ts) — distinct from Playwright's
+    // own e2e/**/*.spec.ts files, which use @playwright/test's `test` and
+    // rely on Playwright's own fixtures/runner, not Vitest's.
+    include: ["src/**/*.test.{ts,tsx}", "e2e/**/*.test.ts"],
+    exclude: ["e2e/**/*.spec.ts"],
   },
 });

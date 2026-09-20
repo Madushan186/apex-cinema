@@ -16,6 +16,12 @@ function readBool(name: string, fallback: boolean): boolean {
   return value === "true";
 }
 
+function readPort(name: string, fallback: number): number {
+  const value = import.meta.env[name] as string | undefined;
+  const parsed = value ? Number(value) : NaN;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 // Defaults match app/.env.example exactly: a "demo-" prefixed project id
 // that the Firebase Emulator Suite treats as offline-only (never a real GCP
 // project), so the app boots safely into emulator mode with zero setup.
@@ -35,4 +41,12 @@ export const env = {
   // to production without explicit approval).
   useEmulator: readBool("VITE_USE_FIREBASE_EMULATOR", true),
   emulatorHost: readEnv("VITE_FIREBASE_EMULATOR_HOST", "127.0.0.1"),
+  // Overridable only for an isolated test run (see firebase.test.json /
+  // docs/PROGRESS.md "isolated emulator test ports") — every default here
+  // matches firebase.json exactly, so normal dev/preview is unaffected.
+  emulatorPorts: {
+    auth: readPort("VITE_FIREBASE_EMULATOR_AUTH_PORT", 9099),
+    firestore: readPort("VITE_FIREBASE_EMULATOR_FIRESTORE_PORT", 8080),
+    functions: readPort("VITE_FIREBASE_EMULATOR_FUNCTIONS_PORT", 5001),
+  },
 };

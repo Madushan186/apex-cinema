@@ -6,6 +6,7 @@ import { onCall } from "firebase-functions/v2/https";
 // later, explicit decision — see docs/DECISIONS.md.
 
 export { createHold } from "./createHold";
+export { createManualBooking } from "./createManualBooking";
 export { getAvailability } from "./getAvailability";
 export { getOwnerOverview } from "./getOwnerOverview";
 export { getPackages } from "./getPackages";
