@@ -25,8 +25,12 @@ export const COLLECTIONS = {
   inventory: "inventory",
   bookings: "bookings",
   holdIdempotency: "holdIdempotency",
+  /** Idempotency records for createManualBooking — kept separate from holdIdempotency since it's a different operation/response shape. */
+  manualBookingIdempotency: "manualBookingIdempotency",
   rateLimits: "rateLimits",
   config: "config",
+  /** Append-only, Cloud-Functions-only writes (docs/ARCHITECTURE.md §3, docs/SECURITY.md §8). No customer PII — see lib/inventory.ts's manual-booking audit write. */
+  auditLog: "auditLog",
 } as const;
 
 export function inventoryDocId(roomId: string, dateISO: string): string {

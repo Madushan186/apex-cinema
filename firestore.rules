@@ -62,7 +62,20 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /manualBookingIdempotency/{key} {
+      allow read, write: if false;
+    }
+
     match /rateLimits/{key} {
+      allow read, write: if false;
+    }
+
+    // Append-only audit trail (docs/SECURITY.md §8) — OWNER-read-only per
+    // the permissions matrix, but no read UI exists yet this phase, so this
+    // stays fully closed to direct client access either way; a future
+    // owner-only audit view would still go through a Cloud Function, not a
+    // rules-gated read (same reasoning as bookings above).
+    match /auditLog/{entryId} {
       allow read, write: if false;
     }
 

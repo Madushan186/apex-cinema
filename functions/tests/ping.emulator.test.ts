@@ -10,12 +10,13 @@ import { initializeApp } from "firebase/app";
 import { connectFunctionsEmulator, getFunctions, httpsCallable } from "firebase/functions";
 import { describe, expect, it } from "vitest";
 import type { PingResponse } from "../src/index";
+import { EMULATOR_PORTS, TEST_PROJECT_ID } from "./testEmulatorPorts";
 
 describe("ping (via Functions emulator)", () => {
   it("responds with ok: true", async () => {
-    const app = initializeApp({ projectId: "demo-apex-cinema" }, "ping-emulator-test");
+    const app = initializeApp({ projectId: TEST_PROJECT_ID }, "ping-emulator-test");
     const functions = getFunctions(app);
-    connectFunctionsEmulator(functions, "127.0.0.1", 5001);
+    connectFunctionsEmulator(functions, "127.0.0.1", EMULATOR_PORTS.functions);
     const ping = httpsCallable<Record<string, never>, PingResponse>(functions, "ping");
     const result = await ping({});
     expect(result.data.ok).toBe(true);

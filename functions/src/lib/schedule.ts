@@ -1,4 +1,4 @@
-import type { PackageId } from "@apex-cinema/booking-core";
+import type { PackageId, PaymentStatus } from "@apex-cinema/booking-core";
 import { COLLECTIONS, db } from "./firestore";
 
 /**
@@ -22,6 +22,12 @@ export interface ScheduleBooking {
   readonly customerName: string;
   readonly customerPhone: string;
   readonly referenceCode: string;
+  /**
+   * Present only on manual reservations this phase (online holds/bookings
+   * don't write this field yet — see docs/DECISIONS.md D14). Shown as-is,
+   * never inferred: absence means "not tracked," not "paid."
+   */
+  readonly paymentStatus: PaymentStatus | null;
 }
 
 interface RawBooking {
@@ -36,6 +42,7 @@ interface RawBooking {
   customerName: string;
   customerPhone: string;
   referenceCode: string;
+  paymentStatus?: PaymentStatus;
 }
 
 /**
@@ -82,6 +89,7 @@ export async function getBookingsForDate(dateISO: string): Promise<readonly Sche
       customerName: raw.customerName,
       customerPhone: raw.customerPhone,
       referenceCode: raw.referenceCode,
+      paymentStatus: raw.paymentStatus ?? null,
     };
     return booking;
   });

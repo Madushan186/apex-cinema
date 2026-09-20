@@ -18,6 +18,7 @@ import {
   initializeTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import { afterAll, beforeAll, describe, it } from "vitest";
+import { EMULATOR_PORTS } from "./testEmulatorPorts";
 
 let testEnv: RulesTestEnvironment;
 
@@ -27,7 +28,7 @@ beforeAll(async () => {
     firestore: {
       rules: readFileSync(resolve(import.meta.dirname, "../../firestore.rules"), "utf8"),
       host: "127.0.0.1",
-      port: 8080,
+      port: EMULATOR_PORTS.firestore,
     },
   });
 });
@@ -84,6 +85,26 @@ describe("firestore.rules", () => {
     const db = testEnv.unauthenticatedContext().firestore();
     await assertFails(db.collection("holdIdempotency").doc("some-key").get());
     await assertFails(db.collection("holdIdempotency").doc("some-key").set({ fingerprint: "x" }));
+  });
+
+  it("denies any client read or write of the manual-booking idempotency records, even a staff/owner-claimed token", async () => {
+    const staffDb = testEnv.authenticatedContext("staff-uid", { role: "staff" }).firestore();
+    await assertFails(staffDb.collection("manualBookingIdempotency").doc("some-key").get());
+    await assertFails(staffDb.collection("manualBookingIdempotency").doc("some-key").set({ fingerprint: "x" }));
+    const ownerDb = testEnv.authenticatedContext("owner-uid", { role: "owner" }).firestore();
+    await assertFails(ownerDb.collection("manualBookingIdempotency").doc("some-key").get());
+  });
+
+  it("denies any client read or write of the audit log, even a staff/owner-claimed token", async () => {
+    const staffDb = testEnv.authenticatedContext("staff-uid", { role: "staff" }).firestore();
+    await assertFails(staffDb.collection("auditLog").doc("some-entry").get());
+    await assertFails(
+      staffDb.collection("auditLog").doc("some-entry").set({ actorUid: "staff-uid", action: "manual_booking_created" }),
+    );
+    const ownerDb = testEnv.authenticatedContext("owner-uid", { role: "owner" }).firestore();
+    // Owner is audit-log-read per docs/SECURITY.md §3, but only via a future
+    // Cloud Function, never a direct client read — see firestore.rules.
+    await assertFails(ownerDb.collection("auditLog").doc("some-entry").get());
   });
 
   it("denies any client read or write of the rate-limit counters", async () => {

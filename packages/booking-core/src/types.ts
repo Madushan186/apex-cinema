@@ -15,8 +15,16 @@ export type BookingStatus =
   | "completed"
   | "no_show";
 
-/** See docs/ARCHITECTURE.md §4 "Payment status" state diagram. */
+/**
+ * See docs/ARCHITECTURE.md §4 "Payment status" state diagram.
+ * "unpaid" (docs/DECISIONS.md D14) is a manual-reservation-only state: no
+ * online payment attempt has happened at all (distinct from every other
+ * value here, which all imply an online PayHere attempt was made). It is
+ * fixed at booking creation and cannot be edited this phase — recording an
+ * actual payment is out of scope until a payment-confirmation function exists.
+ */
 export type PaymentStatus =
+  | "unpaid"
   | "initiated"
   | "pending"
   | "succeeded"

@@ -20,7 +20,7 @@
     "lint": "eslint .",
     "test:unit": "npm run test --workspace packages/booking-core && npm run test --workspace app",
     "test:e2e": "npm run build --workspace packages/booking-core && npm run build --workspace app && npm run test:e2e --workspace app -- --grep-invert @emulator",
-    "test:e2e:emulator": "npm run build --workspace packages/booking-core && npm run build --workspace functions && VITE_DATA_MODE=emulator npm run build --workspace app && firebase emulators:exec --only auth,firestore,functions \"npm run seed:emulator --workspace functions && npm run seed:auth --workspace functions && npm run test:e2e --workspace app -- --grep @emulator\"",
+    "test:e2e:emulator": "bash scripts/test-e2e-emulator-isolated.sh",
     "test:emulators": "npm run build --workspace packages/booking-core && npm run build --workspace functions && firebase emulators:exec --only auth,firestore,functions \"npm run seed:emulator --workspace functions && npm run seed:auth --workspace functions && npm run test --workspace functions\"",
     "emulators": "npm run build --workspace packages/booking-core && npm run build --workspace functions && firebase emulators:start --only auth,firestore,functions",
     "emulators:seeded": "npm run build --workspace packages/booking-core && npm run build --workspace functions && firebase emulators:start --only auth,firestore,functions --import=./emulator-data --export-on-exit=./emulator-data",

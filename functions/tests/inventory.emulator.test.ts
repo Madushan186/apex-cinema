@@ -19,6 +19,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { CreateHoldResult } from "../src/lib/inventory";
 import { COLLECTIONS, inventoryDocId } from "../src/lib/firestore";
+import { EMULATOR_PORTS, TEST_PROJECT_ID } from "./testEmulatorPorts";
 
 interface CreateHoldRequest {
   packageId: string;
@@ -39,9 +40,9 @@ let getAvailability: ReturnType<typeof httpsCallable<{ packageId: string; dateIS
 let getPackages: ReturnType<typeof httpsCallable<Record<string, never>, { packages: unknown[] }>>;
 
 beforeAll(() => {
-  const app = initializeApp({ projectId: "demo-apex-cinema" }, "inventory-emulator-test");
+  const app = initializeApp({ projectId: TEST_PROJECT_ID }, "inventory-emulator-test");
   const functions = getFunctions(app);
-  connectFunctionsEmulator(functions, "127.0.0.1", 5001);
+  connectFunctionsEmulator(functions, "127.0.0.1", EMULATOR_PORTS.functions);
   createHold = httpsCallable(functions, "createHold");
   getAvailability = httpsCallable(functions, "getAvailability");
   getPackages = httpsCallable(functions, "getPackages");

@@ -12,7 +12,8 @@ import {
   slotTimeToMinutes,
 } from "@apex-cinema/booking-core";
 import { COLLECTIONS, db, inventoryDocId } from "./firestore";
-import { fingerprintHoldRequest, generateReferenceCode } from "./reference";
+import { fingerprintHoldRequest, fingerprintManualBookingRequest, generateReferenceCode } from "./reference";
+import type { ManualBookingSource } from "./validation";
 
 /**
  * Per-room, per-business-date inventory design (docs/ARCHITECTURE.md §6):
@@ -238,6 +239,216 @@ export async function createHoldTransactional(
 
     const idempotencyRecord: IdempotencyRecord = { fingerprint, response };
     transaction.set(idempotencyRef, { ...idempotencyRecord, createdAt: FieldValue.serverTimestamp() });
+
+    return response;
+  });
+}
+
+/**
+ * Staff/Owner manual reservation (docs/PROGRESS.md "Staff/Owner manual
+ * bookings" phase). Deliberately reuses this file's exact inventory-doc +
+ * transaction pattern (findFreeRoom/isActive/minutesOverlap, unchanged) so
+ * manual reservations and online holds share one real inventory and can
+ * never disagree about whether a room is free.
+ *
+ * Differences from createHoldTransactional, all intentional:
+ *  - Writes `bookingStatus: "confirmed"` and a `confirmed` interval
+ *    (holdExpiresAtMillis: null) directly — no pending-hold stage. A manual
+ *    reservation is a confirmed room reservation from the moment staff
+ *    submits it, and — because `isActive()` treats "confirmed" as always
+ *    active — it never expires the way an online hold does (see
+ *    docs/ARCHITECTURE.md §6).
+ *  - Writes `paymentStatus: "unpaid"` (docs/DECISIONS.md D14) — booking
+ *    confirmation is NOT payment confirmation; no payment collection exists
+ *    this phase. This is a fixed value, not an editable field.
+ *  - Records `createdBy` (the authenticated staff/owner uid) and `source`
+ *    ("staff_walkin" | "staff_phone") instead of "online".
+ *  - Writes one `auditLog` entry in the same transaction — actor, action,
+ *    booking id, room, date, source, server timestamp. Deliberately NO
+ *    customer name/phone/email (docs/SECURITY.md §8: audit entries must not
+ *    duplicate PII; the booking doc itself is the one place that lives).
+ *  - Idempotency lives in its own `manualBookingIdempotency` collection
+ *    (not `holdIdempotency`) and the fingerprint includes `actorUid`, so a
+ *    replay is only ever "the same" when it's the same staff/owner account
+ *    resubmitting its own attempt.
+ */
+export interface CreateManualBookingParams {
+  readonly packageId: BookablePackageId;
+  readonly dateISO: string;
+  readonly time: SlotTime;
+  readonly peopleCount: number;
+  readonly name: string;
+  readonly phone: string;
+  readonly email: string;
+  readonly source: ManualBookingSource;
+  readonly staffNote: string;
+  readonly idempotencyKey: string;
+}
+
+export interface CreateManualBookingResult {
+  readonly bookingId: string;
+  readonly referenceCode: string;
+  readonly roomId: string;
+  readonly totalAmountMinor: number;
+  readonly currency: "LKR";
+  readonly startISO: string;
+  readonly endISO: string;
+  /** Always "unpaid" this phase — see docs/DECISIONS.md D14. */
+  readonly paymentStatus: "unpaid";
+}
+
+interface ManualIdempotencyRecord {
+  readonly fingerprint: string;
+  readonly response: CreateManualBookingResult;
+}
+
+export async function createManualBookingTransactional(
+  params: CreateManualBookingParams,
+  actorUid: string,
+): Promise<CreateManualBookingResult> {
+  const facts = getPackageFacts(params.packageId);
+  if (!facts || !facts.isBookableOnline) {
+    // "isBookableOnline" also excludes Party for this manual flow — Party
+    // stays entirely out of scope this phase (docs/PROGRESS.md).
+    throw new HttpsError("invalid-argument", "Unknown or non-bookable package.");
+  }
+  const sessionMinutes = facts.sessionMinutes;
+  if (sessionMinutes === null) {
+    throw new HttpsError("failed-precondition", "This package's session length is not confirmed yet.");
+  }
+
+  const startMinute = slotTimeToMinutes(params.time);
+  const endMinute = computeEndMinute(startMinute, sessionMinutes);
+  if (!endsWithinBusinessHours(endMinute)) {
+    throw new HttpsError("invalid-argument", "That session would end after closing time.");
+  }
+
+  // Reject past dates/times using the server's own Asia/Colombo clock — same
+  // rule as createHoldTransactional, never a client-supplied "now".
+  const todayISO = getColomboTodayISO();
+  if (params.dateISO < todayISO) {
+    throw new HttpsError("invalid-argument", "That date has already passed.");
+  }
+  if (params.dateISO === todayISO && startMinute <= getColomboMinuteOfDay()) {
+    throw new HttpsError("invalid-argument", "That start time has already passed today.");
+  }
+
+  const fingerprint = fingerprintManualBookingRequest({ actorUid, ...params });
+  const idempotencyRef = db.collection(COLLECTIONS.manualBookingIdempotency).doc(params.idempotencyKey);
+  const roomIds = facts.roomIds;
+  const inventoryRefs = roomIds.map((roomId) =>
+    db.collection(COLLECTIONS.inventory).doc(inventoryDocId(roomId, params.dateISO)),
+  );
+
+  return db.runTransaction(async (transaction) => {
+    // Firestore transactions require every read before any write.
+    const idempotencySnap = await transaction.get(idempotencyRef);
+    const inventorySnaps = await Promise.all(inventoryRefs.map((ref) => transaction.get(ref)));
+
+    if (idempotencySnap.exists) {
+      const existing = idempotencySnap.data() as ManualIdempotencyRecord;
+      if (existing.fingerprint !== fingerprint) {
+        throw new HttpsError(
+          "already-exists",
+          "This idempotency key was already used for a different booking request.",
+        );
+      }
+      // Exact retry: return the original result unchanged — no new booking,
+      // no new inventory write, no new audit entry.
+      return existing.response;
+    }
+
+    const nowMillis = Date.now();
+    const inventoryByRoom = new Map<string, InventoryDoc | undefined>(
+      roomIds.map((roomId, i) => [roomId, inventorySnaps[i]?.data() as InventoryDoc | undefined]),
+    );
+
+    // Same shared free-room lookup as the online path — a confirmed booking
+    // or an unexpired hold on any candidate room blocks this reservation;
+    // an expired hold does not; adjacent sessions are fine (half-open
+    // interval overlap, not slot-index equality).
+    const freeRoomId = findFreeRoom(roomIds, { start: startMinute, end: endMinute }, inventoryByRoom, nowMillis);
+    if (!freeRoomId) {
+      // No writes staged yet — throwing here leaves Firestore untouched.
+      throw new HttpsError(
+        "failed-precondition",
+        "No rooms are available for this package at that date and time.",
+      );
+    }
+
+    const bookingRef = db.collection(COLLECTIONS.bookings).doc();
+    const totalAmountMinor = priceLKRToMinorUnits(facts.priceLKR);
+    const referenceCode = generateReferenceCode();
+
+    const newInterval: IntervalRecord = {
+      bookingId: bookingRef.id,
+      startMinute,
+      endMinute,
+      status: "confirmed",
+      // Never expires — a manual reservation is confirmed immediately, not
+      // a hold. See docs/PROGRESS.md "must not expire after the online hold
+      // period."
+      holdExpiresAtMillis: null,
+    };
+    const existingIntervals = inventoryByRoom.get(freeRoomId)?.intervals ?? [];
+    const inventoryRef = inventoryRefs[roomIds.indexOf(freeRoomId)];
+    if (!inventoryRef) throw new HttpsError("internal", "Inventory reference resolution failed.");
+
+    transaction.set(inventoryRef, {
+      roomId: freeRoomId,
+      dateISO: params.dateISO,
+      intervals: [...existingIntervals, newInterval],
+    });
+
+    transaction.set(bookingRef, {
+      packageId: params.packageId,
+      roomId: freeRoomId,
+      dateISO: params.dateISO,
+      startMinute,
+      endMinute,
+      bookingStatus: "confirmed",
+      paymentStatus: "unpaid",
+      totalAmountMinor,
+      currency: "LKR",
+      peopleCount: params.peopleCount,
+      customerName: params.name,
+      customerPhone: params.phone,
+      customerEmail: params.email,
+      referenceCode,
+      source: params.source,
+      createdBy: actorUid,
+      staffNote: params.staffNote,
+      idempotencyKey: params.idempotencyKey,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    const response: CreateManualBookingResult = {
+      bookingId: bookingRef.id,
+      referenceCode,
+      roomId: freeRoomId,
+      totalAmountMinor,
+      currency: "LKR",
+      startISO: minuteToISO(params.dateISO, startMinute),
+      endISO: minuteToISO(params.dateISO, endMinute),
+      paymentStatus: "unpaid",
+    };
+
+    const idempotencyRecord: ManualIdempotencyRecord = { fingerprint, response };
+    transaction.set(idempotencyRef, { ...idempotencyRecord, createdAt: FieldValue.serverTimestamp() });
+
+    // Audit trail — actor, action, and enough to locate the booking, but no
+    // customer PII (docs/SECURITY.md §8).
+    const auditRef = db.collection(COLLECTIONS.auditLog).doc();
+    transaction.set(auditRef, {
+      actorUid,
+      action: "manual_booking_created",
+      targetType: "booking",
+      targetId: bookingRef.id,
+      roomId: freeRoomId,
+      dateISO: params.dateISO,
+      source: params.source,
+      createdAt: FieldValue.serverTimestamp(),
+    });
 
     return response;
   });

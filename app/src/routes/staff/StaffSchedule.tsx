@@ -1,4 +1,6 @@
+import { isValidDateISO } from "@apex-cinema/booking-core";
 import { useState } from "react";
+import { Link, useSearchParams } from "react-router";
 import { DateNav } from "@/components/staff/DateNav";
 import { RequireRole } from "@/components/staff/RequireRole";
 import {
@@ -11,6 +13,7 @@ import {
 } from "@/components/staff/scheduleFormat";
 import { StaffTopBar } from "@/components/staff/StaffTopBar";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Notice } from "@/components/ui/notice";
 import type { ScheduleBooking } from "@/data/firebase/staffApi";
@@ -43,14 +46,21 @@ function BookingRow({ booking }: { booking: ScheduleBooking }) {
           {t("staff.referenceLabel")}: {booking.referenceCode}
         </p>
       </div>
-      <Badge variant={STATUS_BADGE_VARIANT[booking.displayStatus]}>{t(statusKey[booking.displayStatus])}</Badge>
+      <div className="flex items-center gap-2">
+        {booking.paymentStatus === "unpaid" ? <Badge variant="warning">{t("staff.unpaidBadge")}</Badge> : null}
+        <Badge variant={STATUS_BADGE_VARIANT[booking.displayStatus]}>{t(statusKey[booking.displayStatus])}</Badge>
+      </div>
     </div>
   );
 }
 
 function ScheduleBody() {
   const { t } = useI18n();
-  const [dateISO, setDateISO] = useState(() => getColomboTodayISO());
+  const [searchParams] = useSearchParams();
+  const [dateISO, setDateISO] = useState(() => {
+    const fromQuery = searchParams.get("date");
+    return fromQuery && isValidDateISO(fromQuery) ? fromQuery : getColomboTodayISO();
+  });
   const { data: bookings, error } = usePromise(() => getStaffSchedule(dateISO), [dateISO]);
 
   const grouped = bookings ? groupByRoom(bookings) : null;
@@ -62,7 +72,12 @@ function ScheduleBody() {
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">{t("staff.scheduleTitle")}</h1>
           <p className="text-muted-foreground mt-1 text-sm">{t("staff.scheduleSubtitle", { date: dateISO })}</p>
         </div>
-        <DateNav dateISO={dateISO} onChange={setDateISO} />
+        <div className="flex flex-wrap items-center gap-3">
+          <Button asChild variant="outline" size="sm">
+            <Link to="/staff/new-booking">{t("staff.newBookingLink")}</Link>
+          </Button>
+          <DateNav dateISO={dateISO} onChange={setDateISO} />
+        </div>
       </div>
 
       <div className="mt-8 flex flex-col gap-4">

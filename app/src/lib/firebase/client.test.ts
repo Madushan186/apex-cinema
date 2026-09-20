@@ -56,7 +56,12 @@ async function loadClientWith(dataMode: "fixture" | "emulator", useEmulator: boo
   vi.resetModules();
   vi.doMock("@/lib/dataMode", () => ({ DATA_MODE: dataMode }));
   vi.doMock("@/lib/env", () => ({
-    env: { firebase: FAKE_FIREBASE_CONFIG, useEmulator, emulatorHost: "127.0.0.1" },
+    env: {
+      firebase: FAKE_FIREBASE_CONFIG,
+      useEmulator,
+      emulatorHost: "127.0.0.1",
+      emulatorPorts: { auth: 9099, firestore: 8080, functions: 5001 },
+    },
   }));
   return import("./client");
 }

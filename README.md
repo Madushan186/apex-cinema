@@ -48,7 +48,7 @@ No `.env` file is required to get started — `app/src/lib/env.ts` defaults to a
 | `npm run lint` | ESLint across the whole repo |
 | `npm run test:unit` | Vitest unit tests for booking-core and the app (no emulator needed) |
 | `npm run test:e2e` | Builds the app (fixture mode), then runs Playwright against the **production build** served via `vite preview` (includes the `@smoke` tests; excludes the `@emulator` test) |
-| `npm run test:e2e:emulator` | Builds the app with `VITE_DATA_MODE=emulator`, then runs the one `@emulator`-tagged Playwright test against real, seeded Auth+Firestore+Functions emulators |
+| `npm run test:e2e:emulator` | Runs `scripts/test-e2e-emulator-isolated.sh`: starts an **isolated** Auth+Firestore+Functions emulator instance (`firebase.test.json`, project `demo-apex-cinema-test` — never your `npm run dev`/`emulators:seeded` live preview), seeds it, builds the app against it, and runs every `@emulator`-tagged Playwright test. Self-contained — no manual env vars needed; cleans up only the emulator process it started. |
 | `npm run smoke` | Same as `test:e2e`, filtered to tests tagged `@smoke` |
 | `npm run test:emulators` | Builds functions, seeds the catalog, then runs `firebase emulators:exec` (Auth + Firestore + Functions) wrapping the functions workspace's Vitest suite — concurrency/idempotency/expiry/validation/rules tests against the real emulators |
 | `npm run seed:emulator` | Seeds `roomTiers`/`rooms`/`config/booking` from the canonical catalog into a persisted local snapshot (`./emulator-data/`, gitignored) — repeatable, refuses to run against anything but the local emulator |
