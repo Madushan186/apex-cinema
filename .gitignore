@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+# Cloud Functions' compiled output only — NOT a bare "lib/" pattern, which
+# would also match real source directories (app/src/lib, functions/src/lib).
+/functions/lib/
+*.tsbuildinfo
+
+# Env files — never commit real secrets or config
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Firebase
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+ui-debug.log
+*-debug.log
+.runtimeconfig.json
+
+# Firebase Emulator data exports (local fixtures only, not committed)
+emulator-data/
+
+# Testing
+coverage/
+playwright-report/
+test-results/
+blob-report/
+.vitest-cache/
+
+# Editor / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# Logs
+npm-debug.log*
+*.log

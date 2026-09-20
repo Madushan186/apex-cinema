@@ -1,0 +1,41 @@
+{
+  "name": "apex-cinema",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Apex Cinema booking platform — monorepo root. See CLAUDE.md and docs/ before making changes.",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "workspaces": [
+    "app",
+    "functions",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run build --workspace packages/booking-core && npm run dev --workspace app",
+    "build": "npm run build --workspace packages/booking-core && npm run build --workspace app",
+    "build:functions": "npm run build --workspace packages/booking-core && npm run build --workspace functions",
+    "preview": "npm run preview --workspace app",
+    "typecheck": "npm run typecheck --workspace packages/booking-core && npm run typecheck --workspace app && npm run typecheck --workspace functions",
+    "lint": "eslint .",
+    "test:unit": "npm run test --workspace packages/booking-core && npm run test --workspace app",
+    "test:e2e": "npm run build --workspace packages/booking-core && npm run build --workspace app && npm run test:e2e --workspace app -- --grep-invert @emulator",
+    "test:e2e:emulator": "npm run build --workspace packages/booking-core && npm run build --workspace functions && VITE_DATA_MODE=emulator npm run build --workspace app && firebase emulators:exec --only auth,firestore,functions \"npm run seed:emulator --workspace functions && npm run seed:auth --workspace functions && npm run test:e2e --workspace app -- --grep @emulator\"",
+    "test:emulators": "npm run build --workspace packages/booking-core && npm run build --workspace functions && firebase emulators:exec --only auth,firestore,functions \"npm run seed:emulator --workspace functions && npm run seed:auth --workspace functions && npm run test --workspace functions\"",
+    "emulators": "npm run build --workspace packages/booking-core && npm run build --workspace functions && firebase emulators:start --only auth,firestore,functions",
+    "emulators:seeded": "npm run build --workspace packages/booking-core && npm run build --workspace functions && firebase emulators:start --only auth,firestore,functions --import=./emulator-data --export-on-exit=./emulator-data",
+    "seed:emulator": "npm run build --workspace packages/booking-core && npm run build --workspace functions && firebase emulators:exec --only auth,firestore --export-on-exit=./emulator-data \"npm run seed:emulator --workspace functions && npm run seed:auth --workspace functions\"",
+    "smoke": "npm run build && npm run test:e2e --workspace app -- --grep @smoke"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.63.0",
+    "eslint": "10.11.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.7",
+    "firebase-tools": "15.30.2",
+    "globals": "17.12.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.0"
+  }
+}

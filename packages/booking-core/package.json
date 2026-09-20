@@ -1,0 +1,14 @@
+{
+  "name": "@apex-cinema/booking-core",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Framework-agnostic, pure booking/business logic — no Firebase, no React. See docs/ARCHITECTURE.md section 13.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  }
+}

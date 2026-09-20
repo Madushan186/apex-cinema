@@ -1,0 +1,148 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/*
+ * Apex Cinema — dark-only design system. See docs/DESIGN.md for the full
+ * rationale, including two deliberate departures from the originally
+ * proposed tokens (border contrast, focus ring) verified with an actual
+ * WCAG contrast calculation, not eyeballing.
+ *
+ * There is no light theme and no toggle — every customer-facing surface
+ * (including forms, dialogs, and the booking wizard) uses these tokens.
+ */
+:root {
+  color-scheme: dark;
+  --radius: 0.625rem;
+
+  /* Base surfaces — as specified in the brief. */
+  --background: #050505;
+  --section: #0b0b0d;
+  --card: #121215;
+  --elevated: #1a1a1f;
+
+  /* Text */
+  --foreground: #f5f4f0;
+  --muted-foreground: #b8b8c2;
+
+  /* Brand */
+  --primary: #c91825;
+  --primary-hover: #ad1420;
+  --gold: #d6b66a;
+
+  /*
+   * Borders: the brief's #2b2b31 measures ~1.3:1 against --card and ~1.4:1
+   * against --background — nowhere near the ~3:1 WCAG 1.4.11 guideline for
+   * perceivable UI-component boundaries. Kept as --border-subtle for purely
+   * decorative hairlines (e.g. under an eyebrow) where that's acceptable;
+   * introduced --border for anything load-bearing (inputs, selectable
+   * cards, dividers that convey structure), measured at ~3.2:1 against
+   * --card. Interactive elements additionally never rely on the border
+   * alone — see the focus-ring and selected-state rules below.
+   */
+  --border-subtle: #2b2b31;
+  --border: #63636b;
+
+  --ring: var(--gold);
+  --destructive: #c91825;
+
+  /* shadcn-shaped aliases so existing components (Button, etc.) pick up the theme unchanged. */
+  --card-foreground: var(--foreground);
+  --popover: var(--elevated);
+  --popover-foreground: var(--foreground);
+  --primary-foreground: #f5f4f0;
+  --secondary: var(--elevated);
+  --secondary-foreground: var(--foreground);
+  --muted: var(--card);
+  --accent: var(--elevated);
+  --accent-foreground: var(--foreground);
+  --destructive-foreground: #f5f4f0;
+  --input: var(--border);
+
+  /* Status colours are always paired with text/icons in components — never colour alone. */
+  --status-positive: #3fae63;
+  --status-warning: #d6b66a;
+  --status-negative: #e2515e;
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-section: var(--section);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-elevated: var(--elevated);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-border-subtle: var(--border-subtle);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-gold: var(--gold);
+  --color-status-positive: var(--status-positive);
+  --color-status-warning: var(--status-warning);
+  --color-status-negative: var(--status-negative);
+
+  /* System font stack for English — no web font to download, keeps the initial payload small. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@layer base {
+  * {
+    @apply border-border-subtle outline-ring/50;
+  }
+  html {
+    @apply bg-background;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+}
+
+/*
+ * Sinhala: loaded on demand (see i18n/LocaleProvider.tsx) and scoped via
+ * :lang(si), which inherits from <html lang="si"> — no extra class needed.
+ * Slightly taller line-height avoids clipping Sinhala's taller glyphs/matras;
+ * no fixed-height headings anywhere rely on a specific line count.
+ */
+:lang(si) {
+  font-family: "Noto Sans Sinhala", ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.65;
+  letter-spacing: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Native dark date input — see BookingDatePicker; a lightweight way to get
+   an accessible, OS-native calendar UI that still matches the dark theme. */
+input[type="date"] {
+  color-scheme: dark;
+}

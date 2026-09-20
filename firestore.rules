@@ -1,0 +1,74 @@
+rules_version = '2';
+
+// Default-deny, as required by docs/SECURITY.md §1 and CLAUDE.md rule 5.
+// Every booking/payment/role/audit write happens through Cloud Functions
+// using the Admin SDK, which bypasses these rules entirely — nothing here
+// ever needs to `allow write` for that path. What's below is only the
+// narrow, non-sensitive public *read* surface described in
+// docs/SECURITY.md §2 (data classification table).
+//
+// IMPORTANT: the Admin SDK (every Cloud Function in functions/src) bypasses
+// these rules entirely. This file is NOT the access-control layer for
+// bookings/inventory/holds — the validation and authorization for those
+// live in functions/src/lib/validation.ts and the transaction logic in
+// functions/src/lib/inventory.ts. This file's only job is to make sure a
+// browser client, calling Firestore directly with no function in between,
+// can never read PII or write anything at all.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Room tiers, prices, capacity — public, non-sensitive (docs/SECURITY.md §2).
+    // Includes Party (isBookableOnline: false) since its price/features are
+    // shown on public marketing pages — exclusion from the *booking wizard*
+    // is enforced by application code and by createHold rejecting it
+    // server-side, not by hiding the tier doc itself.
+    match /roomTiers/{tierId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Public, non-PII business config (open hours, fixed start times).
+    // Does NOT include anything price-authoritative for checkout — prices
+    // are re-derived server-side at booking time, never trusted from a
+    // client read of this document.
+    match /config/booking {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Physical rooms — internal identifiers only (docs/PROJECT_BRIEF.md:
+    // customers never pick or see a room number). No client read or write.
+    match /rooms/{roomId} {
+      allow read, write: if false;
+    }
+
+    // Per-room/per-date inventory locks (docs/ARCHITECTURE.md §6) — the
+    // core of the anti-double-booking mechanism. Never client-readable
+    // (would leak occupancy patterns) or writable (would defeat the whole
+    // point of server-side allocation).
+    match /inventory/{inventoryId} {
+      allow read, write: if false;
+    }
+
+    // Bookings/holds — contain customer PII (name/phone/email) and the
+    // server-computed amount/status. Never client-readable or writable;
+    // "find my booking" (when implemented) is a Cloud Function, not a
+    // direct rules-gated read (docs/ARCHITECTURE.md §7).
+    match /bookings/{bookingId} {
+      allow read, write: if false;
+    }
+
+    match /holdIdempotency/{key} {
+      allow read, write: if false;
+    }
+
+    match /rateLimits/{key} {
+      allow read, write: if false;
+    }
+
+    // Everything else: no client read or write, full stop.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
