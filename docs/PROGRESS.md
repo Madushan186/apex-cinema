@@ -834,9 +834,52 @@ The bug-fix pass above disclosed, as a "self-inflicted false alarm," that `app/e
 Isolated emulator stopped after every run (confirmed via port checks). The live preview emulator was confirmed healthy (auth/firestore/functions all responding) and untouched throughout — never imported from, exported to, reset, or reseeded.
 
 **Known limitations / honest gaps after this fix:**
-- `test:e2e:emulator` will now fail-fast on the conflict/race test when run as-is (see above) — not fixed here, since doing so means editing that root script to pass isolated coordinates, which is root/global tooling and wasn't requested. Flagging as the clear next step if that script needs to keep working unattended.
+- ~~`test:e2e:emulator` will now fail-fast on the conflict/race test when run as-is... not fixed here~~ — **fixed in the checkpoint pass immediately below**, since the user clarified editing this repo's `package.json` scripts and local test config is authorized (only machine-wide Node/Homebrew setup is "global tooling").
 - `functions/tests/testEmulatorPorts.ts` still has a permissive default, kept deliberately (see above) — if its own safe-by-construction assumption (`emulators:exec` always fails to bind already-occupied preview ports) is ever found to not hold in some environment, it would need the same treatment.
 - No product code changed — this entire fix is confined to `app/e2e/*` (test-only files) and `app/vite.config.ts`/`app/playwright.config.ts` (test-runner glob scoping).
+
+#### Checkpoint (2026-09-21): `test:e2e:emulator` fixed to supply consistent isolated config, committed, pushed, PR opened
+
+The fix above deliberately left `npm run test:e2e:emulator` broken-as-disclosed (it never exported `TEST_*`, so it would now fail-fast rather than silently reuse the preview's coordinates) because fixing it meant editing root `package.json`/adding a script, which the previous instructions' "do not change global tooling" left ambiguous. Clarified this session: editing this repo's own `package.json` scripts and local test configuration is in scope — "global tooling" means the machine's Node/Homebrew setup, not this repository's own npm scripts.
+
+**Fix — `scripts/test-e2e-emulator-isolated.sh` (new) + `package.json`'s `test:e2e:emulator` now just runs it:**
+- Defines the isolated project id (`demo-apex-cinema-test`) and ports (9199/8180/5101, matching `firebase.test.json`) in exactly one place, and exports them as both `TEST_*` (for `app/e2e/isolatedEmulatorConfig.ts`) and the standard Admin SDK vars (`FIRESTORE_EMULATOR_HOST`/`FIREBASE_AUTH_EMULATOR_HOST`/`GCLOUD_PROJECT`, for the seed scripts) — so the emulator instance, the seed scripts, the built browser app, and the Playwright test helpers can no longer drift apart across separate shell invocations, which was the root cause of the original incident.
+- Does **not** use `firebase emulators:exec` (what the old script and `test:emulators` use) — per the standing, already-documented finding in this same file ("isolated emulator test ports": `emulators:exec` was found unreliable specifically for a second, isolated instance in this environment, failing almost instantly with `auth/user-not-found` even with fully correct config). Uses the confirmed-reliable substitute instead: `emulators:start` in the background, a readiness poll (up to 120s, checking both "All emulators ready" in the log and that the process is still alive), then seed/build/test as plain foreground commands.
+- `trap cleanup EXIT INT TERM` stops **only the exact PID this script itself started** (tracked via `$!`, `kill -0` liveness-checked before signalling) — never a broad pattern match that could also match the live preview's own `firebase emulators:start ... --import=./emulator-data` process. Runs unconditionally on success, failure, or interrupt.
+- Auto-detects Java (needed by the Auth/Firestore emulators, not linked onto `PATH` by default on this machine) and adds `openjdk@21`'s bin directory to `PATH` **for this script's own subprocess only** if a working `java` isn't already resolvable — never exported globally, never touches the shell profile. If no working Java can be found at all, fails immediately with a clear message rather than silently proceeding.
+- Never imports from, exports to, resets, or reseeds `./emulator-data` (the live preview's persisted data) — the isolated instance is always started with no `--import`/`--export-on-exit` flags, an entirely separate, ephemeral instance.
+
+**Scope of the change:** `package.json` (`test:e2e:emulator` now `bash scripts/test-e2e-emulator-isolated.sh`, one line), `scripts/test-e2e-emulator-isolated.sh` (new), `README.md` (updated the script's description in the scripts table to match). `test:emulators` (backend-only) is untouched — it still uses `emulators:exec` with no isolation, which remains safe for the reasons already documented above (its default-port instance fails to start at all if the preview is already bound to those ports, rather than silently colliding with it).
+
+**Verification — exact documented command, process-scoped Node 22, zero manual environment setup:**
+
+```sh
+export PATH="/opt/homebrew/opt/node@22/bin:$PATH"   # the only PATH change made from outside the script
+npm run test:e2e:emulator
+```
+
+No other env var was set by hand before this command — everything the script needs (`TEST_*`, the Admin SDK vars, `VITE_FIREBASE_*` for the app build, and Java's `PATH` entry if needed) is set inside the script itself.
+
+| Check | Result |
+|---|---|
+| `npm run typecheck` (booking-core + app + functions) | ✅ pass |
+| `npm run lint` (root `eslint .`) | ✅ pass |
+| `npm run test:unit` (booking-core: 21 + app: 50, Node 22) | ✅ **71/71** |
+| `bash -n scripts/test-e2e-emulator-isolated.sh` | ✅ no syntax errors |
+| **`npm run test:e2e:emulator`** (exact command, Node 22, no manual env setup) | ✅ **14/14** — builds core+functions, starts the isolated instance, seeds it, builds the app against it, runs the full `@emulator` Playwright suite, then stops the isolated instance automatically |
+| Isolated ports (9199/8180/5101) after the run | ✅ confirmed free — the script's own cleanup stopped its emulator process |
+| Live preview (auth 9099 / firestore 8080 / functions 5001) before vs. after | ✅ unchanged — all three still responding, healthy |
+| Live preview `holds`/`bookings` collections, before vs. after | ✅ unchanged — 0/0 both times (direct Firestore-emulator REST read) |
+| `./emulator-data/` file timestamps, before vs. after | ✅ unchanged (`Sep 20 13:53`, untouched) |
+
+**Diff review before committing:** read the full `git status`/`git diff` for every file about to be staged. Grepped for API keys, secrets, tokens, and private-key markers — the only matches were the pre-existing, already-established synthetic local-emulator test credentials (`LocalStaff!123`, `LocalOwner!123`, `TestPass!12345`, `apiKey: "demo-api-key"`) used throughout the existing test suite for a `demo-`-prefixed, offline-only emulator project — never real credentials. No `.env`/credential/key files staged. Confirmed `app/dist`, `functions/lib`, `emulator-data`, and `node_modules` all stay gitignored and were not part of the diff. No customer data anywhere — only synthetic test fixtures (already the established convention in every existing `@emulator` test).
+
+**Committed, pushed, PR opened** — commit `7ca1130` on `feature/staff-manual-bookings` (covers this phase's full manual-bookings feature plus both bug-fix passes above — a single checkpoint commit, consistent with this repo's existing phase-level commit granularity), pushed to `origin/feature/staff-manual-bookings`, PR opened into `main`: https://github.com/Madushan186/apex-cinema/pull/1. Not merged (per instruction) — awaiting review.
+
+**Known limitations / honest gaps after this checkpoint:**
+- `test:emulators` (backend-only, `emulators:exec`, unisolated) remains untouched, as before — not in scope, still considered safe for the documented reason.
+- The `emulators:exec`-unreliable-for-isolated-instances root cause is still not diagnosed, only reliably worked around (unchanged from before).
+- This PROGRESS.md update itself landed in a small follow-up commit after the main checkpoint commit (`7ca1130`), rather than being folded into it — noted here rather than silently amending an already-pushed commit.
 
 ### Phase 6 — proposed next steps (not started, not approved)
 
