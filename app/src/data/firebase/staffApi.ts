@@ -3,7 +3,7 @@ import { FirebaseError } from "firebase/app";
 import { httpsCallable } from "firebase/functions";
 import { functions } from "@/lib/firebase/client";
 
-export type DisplayStatus = "active-hold" | "expired-hold" | "confirmed" | "other";
+export type DisplayStatus = "active-hold" | "expired-hold" | "confirmed" | "cancelled" | "other";
 
 export interface ScheduleBooking {
   readonly bookingId: string;
@@ -19,6 +19,10 @@ export interface ScheduleBooking {
   readonly referenceCode: string;
   /** Present only for manual reservations this phase — see docs/DECISIONS.md D14. */
   readonly paymentStatus: PaymentStatus | null;
+  /** "staff_walkin" | "staff_phone" | "online" | null. Cosmetic input to the cancel-button eligibility check only — the server re-checks everything. */
+  readonly source: string | null;
+  /** Staff-authored reason, present only once cancelled. */
+  readonly cancellationReason: string | null;
 }
 
 export interface ScheduleCounts {
@@ -124,5 +128,70 @@ export async function createManualBooking(input: CreateManualBookingInput): Prom
       throw new ManualBookingError(mapManualBookingErrorCode(error.code), error.message);
     }
     throw new ManualBookingError("unknown", "Something went wrong creating this booking. Please try again.");
+  }
+}
+
+export interface CancelManualBookingInput {
+  readonly bookingId: string;
+  readonly reason: string;
+}
+
+export interface CancelManualBookingResult {
+  readonly bookingId: string;
+  readonly bookingStatus: "cancelled";
+  readonly cancelledAtMillis: number;
+  readonly cancelledBy: string;
+  readonly roomId: string;
+  readonly dateISO: string;
+}
+
+/** Discriminated failure reasons the cancel dialog needs to render distinct, honest messages for. */
+export type CancelManualBookingErrorReason = "not-found" | "ineligible" | "invalid-request" | "unknown";
+
+export class CancelManualBookingError extends Error {
+  constructor(
+    public readonly reason: CancelManualBookingErrorReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CancelManualBookingError";
+  }
+}
+
+function mapCancelManualBookingErrorCode(code: string): CancelManualBookingErrorReason {
+  switch (code) {
+    case "functions/not-found":
+      return "not-found";
+    case "functions/failed-precondition":
+      return "ineligible";
+    case "functions/invalid-argument":
+      return "invalid-request";
+    default:
+      return "unknown";
+  }
+}
+
+const cancelManualBookingCallable = httpsCallable<CancelManualBookingInput, CancelManualBookingResult>(
+  functions,
+  "cancelManualBooking",
+);
+
+/**
+ * Staff or Owner — see functions/src/cancelManualBooking.ts. Cancels a
+ * CONFIRMED, UNPAID, staff/owner-entered manual reservation for a standard
+ * room whose session has not yet started. Never changes payment status,
+ * never issues a refund. Idempotent — cancelling an already-cancelled
+ * booking succeeds and returns the original cancellation, so a retry after
+ * a network error or a double-click is always safe to call again.
+ */
+export async function cancelManualBooking(input: CancelManualBookingInput): Promise<CancelManualBookingResult> {
+  try {
+    const result = await cancelManualBookingCallable(input);
+    return result.data;
+  } catch (error) {
+    if (error instanceof FirebaseError) {
+      throw new CancelManualBookingError(mapCancelManualBookingErrorCode(error.code), error.message);
+    }
+    throw new CancelManualBookingError("unknown", "Something went wrong cancelling this booking. Please try again.");
   }
 }

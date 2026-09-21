@@ -8,7 +8,7 @@ import { COLLECTIONS, db } from "./firestore";
  */
 const MAX_BOOKINGS_PER_DAY = 200;
 
-export type DisplayStatus = "active-hold" | "expired-hold" | "confirmed" | "other";
+export type DisplayStatus = "active-hold" | "expired-hold" | "confirmed" | "cancelled" | "other";
 
 export interface ScheduleBooking {
   readonly bookingId: string;
@@ -28,6 +28,16 @@ export interface ScheduleBooking {
    * never inferred: absence means "not tracked," not "paid."
    */
   readonly paymentStatus: PaymentStatus | null;
+  /**
+   * "staff_walkin" | "staff_phone" | "online" | null (online holds don't
+   * write this field). Exposed so the staff UI can decide, cosmetically,
+   * which rows to offer a cancel action on — the actual eligibility check
+   * is always re-done server-side in cancelManualBookingTransactional
+   * (docs/SECURITY.md §3: "UI hiding of buttons is cosmetic only").
+   */
+  readonly source: string | null;
+  /** Staff-authored reason, present only once cancelled. Never customer PII — same treatment as `staffNote`. */
+  readonly cancellationReason: string | null;
 }
 
 interface RawBooking {
@@ -43,6 +53,8 @@ interface RawBooking {
   customerPhone: string;
   referenceCode: string;
   paymentStatus?: PaymentStatus;
+  source?: string;
+  cancellationReason?: string;
 }
 
 /**
@@ -53,6 +65,7 @@ interface RawBooking {
  * booking doc just to display it correctly.
  */
 function deriveStatus(raw: RawBooking, nowMillis: number): DisplayStatus {
+  if (raw.bookingStatus === "cancelled") return "cancelled";
   if (raw.bookingStatus === "confirmed") return "confirmed";
   if (raw.bookingStatus === "pending_hold") {
     const expiresAt = raw.holdExpiresAt?.toMillis() ?? 0;
@@ -90,6 +103,8 @@ export async function getBookingsForDate(dateISO: string): Promise<readonly Sche
       customerPhone: raw.customerPhone,
       referenceCode: raw.referenceCode,
       paymentStatus: raw.paymentStatus ?? null,
+      source: raw.source ?? null,
+      cancellationReason: raw.cancellationReason ?? null,
     };
     return booking;
   });

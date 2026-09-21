@@ -34,7 +34,7 @@ import type { ManualBookingSource } from "./validation";
  * to mutate room occupancy.
  */
 
-export type IntervalStatus = "pending_hold" | "confirmed";
+export type IntervalStatus = "pending_hold" | "confirmed" | "cancelled";
 
 export interface IntervalRecord {
   readonly bookingId: string;
@@ -56,6 +56,15 @@ export interface InventoryDoc {
  * pending hold that hasn't expired yet — evaluated against `nowMillis`
  * (the Cloud Function's own clock) every time, inside the transaction.
  * There is no background sweep this correctness depends on.
+ *
+ * A "cancelled" interval (see cancelManualBookingTransactional below) is
+ * always inactive — it falls through to the `holdExpiresAtMillis` check
+ * below, and a cancelled interval always has that field set to `null`, so
+ * this never needs its own explicit branch. Kept as a documented invariant
+ * rather than a silent coincidence: if a future change ever writes a
+ * cancelled interval with a non-null `holdExpiresAtMillis`, this comment is
+ * the tripwire for whoever's reading this to notice `isActive` no longer
+ * handles it correctly.
  */
 export function isActive(interval: IntervalRecord, nowMillis: number): boolean {
   if (interval.status === "confirmed") return true;
@@ -451,5 +460,214 @@ export async function createManualBookingTransactional(
     });
 
     return response;
+  });
+}
+
+/**
+ * Cancellation of a confirmed, unpaid, staff/owner-entered manual
+ * reservation for a standard room (1–5) — docs/PROGRESS.md "manual-booking
+ * cancellation" phase, docs/DECISIONS.md D10/D15. Deliberately narrow, per
+ * this phase's approved rules:
+ *  - Only bookings created via createManualBookingTransactional are
+ *    eligible: `source` must be "staff_walkin" or "staff_phone" (excludes
+ *    online holds/bookings, and any future "staff_party" source — Party is
+ *    out of scope). Checked directly, not inferred from `bookingStatus`
+ *    alone, so this stays correct even once a future phase teaches online
+ *    bookings to reach `bookingStatus: "confirmed"` too.
+ *  - Only `paymentStatus: "unpaid"` bookings are eligible — the only value
+ *    that exists for manual bookings today (D14), checked explicitly so
+ *    this doesn't silently widen once a future phase adds payment
+ *    recording and `paymentStatus` can become something else.
+ *  - Only standard rooms (packages where `isBookableOnline` is true) —
+ *    excludes Party (room 6), same check `createManualBookingTransactional`
+ *    already uses to keep Party out of the manual-booking surface.
+ *  - Only before the session starts, checked against the server's own
+ *    Asia/Colombo clock — never a client-supplied "now" (same rule
+ *    createHoldTransactional/createManualBookingTransactional already use
+ *    for rejecting past-dated requests). No Owner override for a started
+ *    booking this phase (docs/DECISIONS.md D15) — that's explicitly future
+ *    work, not silently implemented here.
+ *  - Cancellation never changes `paymentStatus` and never issues a refund —
+ *    it only flips `bookingStatus` and records who/when/why.
+ *
+ * Idempotency is the booking's own current state, not a separate
+ * idempotency-key collection: this operation is a state transition on an
+ * existing document, not a create-a-new-resource operation, so "has this
+ * already happened" is exactly "is bookingStatus already cancelled" — no
+ * second source of truth to keep in sync. A retry/double-click that lands
+ * after the first one has committed re-reads the booking fresh (Firestore
+ * re-runs the whole transaction callback on a conflicting concurrent write)
+ * and takes the early-return branch below: no new write, no new audit
+ * entry, no repeated inventory release, and the original cancellation's
+ * details are returned unchanged.
+ */
+export interface CancelManualBookingParams {
+  readonly bookingId: string;
+  readonly reason: string;
+}
+
+export interface CancelManualBookingResult {
+  readonly bookingId: string;
+  readonly bookingStatus: "cancelled";
+  readonly cancelledAtMillis: number;
+  readonly cancelledBy: string;
+  readonly roomId: string;
+  readonly dateISO: string;
+}
+
+interface RawBookingForCancellation {
+  readonly packageId: string;
+  readonly roomId: string;
+  readonly dateISO: string;
+  readonly startMinute: number;
+  readonly endMinute: number;
+  readonly bookingStatus: string;
+  readonly paymentStatus?: string;
+  readonly source?: string;
+  readonly cancelledAtMillis?: number;
+  readonly cancelledBy?: string;
+}
+
+export async function cancelManualBookingTransactional(
+  params: CancelManualBookingParams,
+  actorUid: string,
+): Promise<CancelManualBookingResult> {
+  const bookingRef = db.collection(COLLECTIONS.bookings).doc(params.bookingId);
+
+  return db.runTransaction(async (transaction) => {
+    // Firestore transactions require every read before any write — the
+    // booking doc is read first because whether an inventory read is even
+    // needed depends on what it says (the idempotent-no-op branch below
+    // needs none at all).
+    const bookingSnap = await transaction.get(bookingRef);
+    if (!bookingSnap.exists) {
+      throw new HttpsError("not-found", "Booking not found.");
+    }
+    const booking = bookingSnap.data() as RawBookingForCancellation;
+
+    // Idempotent no-op — see the function-level doc comment above. Handles
+    // double-clicks and safe retries: the booking's own current state IS
+    // the idempotency check, so no duplicate audit entry or repeated
+    // inventory release ever happens, regardless of how many times this is
+    // called or what `reason` a later call sends.
+    if (booking.bookingStatus === "cancelled") {
+      return {
+        bookingId: params.bookingId,
+        bookingStatus: "cancelled",
+        cancelledAtMillis: booking.cancelledAtMillis ?? 0,
+        cancelledBy: booking.cancelledBy ?? actorUid,
+        roomId: booking.roomId,
+        dateISO: booking.dateISO,
+      };
+    }
+
+    if (booking.bookingStatus !== "confirmed") {
+      throw new HttpsError("failed-precondition", "Only a confirmed booking can be cancelled.");
+    }
+    if (booking.source !== "staff_walkin" && booking.source !== "staff_phone") {
+      // Excludes online (source: "online") and any future Party source
+      // (source: "staff_party") — this operation only ever cancels a
+      // staff/owner-entered manual reservation, per this phase's scope.
+      throw new HttpsError(
+        "failed-precondition",
+        "Only staff/owner-entered manual bookings can be cancelled here.",
+      );
+    }
+    if (booking.paymentStatus !== "unpaid") {
+      throw new HttpsError("failed-precondition", "Only unpaid bookings can be cancelled here.");
+    }
+
+    const facts = getPackageFacts(booking.packageId);
+    if (!facts || !facts.isBookableOnline) {
+      // Defense-in-depth: excludes Party (room 6) even if a booking doc
+      // with packageId "party" somehow reached this state — Party is out
+      // of scope for cancellation this phase.
+      throw new HttpsError("failed-precondition", "This booking's package cannot be cancelled here.");
+    }
+
+    // Eligibility: the session must not have started yet, checked against
+    // the server's own Asia/Colombo clock. No Owner override this phase —
+    // an in-progress or past booking is rejected for both roles alike (see
+    // the function-level doc comment above).
+    const todayISO = getColomboTodayISO();
+    const nowMinute = getColomboMinuteOfDay();
+    const hasStarted = booking.dateISO < todayISO || (booking.dateISO === todayISO && booking.startMinute <= nowMinute);
+    if (hasStarted) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This booking has already started and can no longer be cancelled.",
+      );
+    }
+
+    const inventoryRef = db.collection(COLLECTIONS.inventory).doc(inventoryDocId(booking.roomId, booking.dateISO));
+    const inventorySnap = await transaction.get(inventoryRef);
+    const inventoryDoc = inventorySnap.data() as InventoryDoc | undefined;
+    const intervals = inventoryDoc?.intervals ?? [];
+    const targetInterval = intervals.find((interval) => interval.bookingId === params.bookingId);
+    if (!targetInterval) {
+      // The booking says it's confirmed but its own inventory interval is
+      // missing — an internal data-consistency problem, not a normal
+      // rejection path. Fail loudly rather than silently cancelling a
+      // booking with nothing to release.
+      throw new HttpsError("internal", "This booking's inventory record could not be found.");
+    }
+
+    // Release ONLY this booking's own interval — every other interval on
+    // this room/date (including other bookings' sessions later the same
+    // day) is left completely untouched, by construction: `.map()` only
+    // ever replaces the one entry whose `bookingId` matches this booking.
+    const updatedIntervals = intervals.map((interval) =>
+      interval.bookingId === params.bookingId
+        ? { ...interval, status: "cancelled" as const, holdExpiresAtMillis: null }
+        : interval,
+    );
+
+    const nowMillis = Date.now();
+
+    transaction.set(inventoryRef, {
+      roomId: booking.roomId,
+      dateISO: booking.dateISO,
+      intervals: updatedIntervals,
+    });
+
+    // Booking history is preserved, not deleted — every original field
+    // (customer details, price, source, etc.) stays exactly as written at
+    // creation; only the status/cancellation fields are added. paymentStatus
+    // is deliberately untouched — cancellation never changes payment status
+    // or issues a refund (docs/DECISIONS.md D12/D15).
+    transaction.update(bookingRef, {
+      bookingStatus: "cancelled",
+      cancelledAtMillis: nowMillis,
+      cancelledBy: actorUid,
+      cancellationReason: params.reason,
+    });
+
+    // Audit trail with a real before/after diff (docs/SECURITY.md §8) — the
+    // first audit entry in this codebase that's an *edit*, not a creation
+    // (see docs/ARCHITECTURE.md §3). Only structural status fields are
+    // recorded, never the reason text or any customer detail — the reason
+    // lives on the booking doc itself (same precedent as `staffNote`), so
+    // it's never duplicated into the audit log.
+    const auditRef = db.collection(COLLECTIONS.auditLog).doc();
+    transaction.set(auditRef, {
+      actorUid,
+      action: "manual_booking_cancelled",
+      targetType: "booking",
+      targetId: params.bookingId,
+      roomId: booking.roomId,
+      dateISO: booking.dateISO,
+      before: { bookingStatus: "confirmed" },
+      after: { bookingStatus: "cancelled" },
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    return {
+      bookingId: params.bookingId,
+      bookingStatus: "cancelled",
+      cancelledAtMillis: nowMillis,
+      cancelledBy: actorUid,
+      roomId: booking.roomId,
+      dateISO: booking.dateISO,
+    };
   });
 }
