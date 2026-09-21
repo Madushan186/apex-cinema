@@ -42,7 +42,18 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    command: `npm run dev -- --host 127.0.0.1 --port ${PORT} --strict-port`,
+    // --force: Vite's own optimizeDeps cache lives on disk at
+    // app/node_modules/.vite/deps and is keyed off a hash of
+    // package.json/lockfile — NOT off a linked workspace package's actual
+    // source content (docs/PROGRESS.md "Dev-server blank-screen fix #2").
+    // Without --force, a plain `vite dev` start can silently reuse a cache
+    // written before a new @apex-cinema/booking-core export was added
+    // (discovered when ADVANCE_AMOUNT_LKR was added this phase — the exact
+    // same failure mode as the EXTENSION_FEE_LKR incident this suite was
+    // built to catch), even though `reuseExistingServer: false` guarantees
+    // a fresh PROCESS. --force makes "fresh process" also mean "fresh
+    // dependency scan," which is what this suite's whole premise depends on.
+    command: `npm run dev -- --host 127.0.0.1 --port ${PORT} --strict-port --force`,
     url: `http://127.0.0.1:${PORT}`,
     // Always start a genuinely fresh dev server for this suite — never
     // reuse one that might already be running (e.g. the developer's own

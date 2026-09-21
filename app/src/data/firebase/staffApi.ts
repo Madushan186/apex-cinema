@@ -29,6 +29,10 @@ export interface ScheduleBooking {
   readonly extensionCount: number;
   /** Sum of all extension fees, minor units — 0 if none. */
   readonly extensionChargesMinor: number;
+  /** Running total actually paid (cash advance + any later recorded payment), minor units. */
+  readonly amountPaidMinor: number;
+  /** (totalAmountMinor + extensionChargesMinor) - amountPaidMinor. null only when totalAmountMinor itself is null (an online hold/booking). */
+  readonly balanceDueMinor: number | null;
 }
 
 export interface ScheduleCounts {
@@ -76,17 +80,28 @@ export interface CreateManualBookingInput {
   readonly staffNote: string;
   /** Client-generated once per submission attempt; a retry must reuse the same key. */
   readonly idempotencyKey: string;
+  /**
+   * Must be the literal `true` — docs/DECISIONS.md D17: every new booking
+   * requires the LKR 1,000 cash advance before confirmation. Set only once
+   * staff has explicitly checked the "I have received this cash" box on the
+   * review step — never preselected or implied.
+   */
+  readonly advanceReceivedConfirmation: true;
 }
 
 export interface ManualBookingResult {
   readonly bookingId: string;
   readonly referenceCode: string;
   readonly roomId: string;
+  /** Original package price only — never includes the advance. */
   readonly totalAmountMinor: number;
   readonly currency: "LKR";
   readonly startISO: string;
   readonly endISO: string;
-  readonly paymentStatus: "unpaid";
+  /** Always the LKR 1,000 advance at creation (docs/DECISIONS.md D17). */
+  readonly amountPaidMinor: number;
+  readonly balanceDueMinor: number;
+  readonly paymentStatus: "unpaid" | "partially_paid" | "paid";
 }
 
 /** Discriminated failure reasons the manual-booking form needs to render distinct, honest messages for — same shape as data/types.ts's HoldError. */
@@ -222,6 +237,9 @@ export interface ExtendManualBookingResult {
   readonly extensionCount: number;
   readonly extensionChargesMinor: number;
   readonly newTotalAmountMinor: number;
+  /** Never changed by an extension (docs/DECISIONS.md D17). */
+  readonly amountPaidMinor: number;
+  readonly balanceDueMinor: number;
   readonly currency: "LKR";
 }
 
@@ -262,14 +280,16 @@ const extendManualBookingCallable = httpsCallable<ExtendManualBookingInput, Exte
 
 /**
  * Staff or Owner — see functions/src/extendManualBooking.ts. Adds exactly
- * +60 minutes and +LKR 1,000 to a CONFIRMED, UNPAID, staff/owner-entered
- * manual reservation for a standard room, only when the extra hour is free
- * on that same room and the extension ends at or before 21:00. Never
- * changes payment status, never collects a payment. `stale-state` means
- * the booking has changed since the caller last looked at it (e.g. someone
- * else extended or cancelled it in the meantime) — the caller must refresh
- * and, if it's still wanted, submit a fresh request with the current end
- * time and a new idempotency key.
+ * +60 minutes and +LKR 1,000 to a CONFIRMED, staff/owner-entered manual
+ * reservation for a standard room — unpaid, partially paid, or fully paid
+ * are all eligible (docs/DECISIONS.md D17) — only when the extra hour is
+ * free on that same room and the extension ends at or before 21:00. Grows
+ * the total and balance due; never touches the amount already paid, never
+ * collects a payment itself. `stale-state` means the booking has changed
+ * since the caller last looked at it (e.g. someone else extended or
+ * cancelled it in the meantime) — the caller must refresh and, if it's
+ * still wanted, submit a fresh request with the current end time and a new
+ * idempotency key.
  */
 export async function extendManualBooking(input: ExtendManualBookingInput): Promise<ExtendManualBookingResult> {
   try {
@@ -280,5 +300,84 @@ export async function extendManualBooking(input: ExtendManualBookingInput): Prom
       throw new ExtendManualBookingError(mapExtendManualBookingErrorCode(error.code), error.message);
     }
     throw new ExtendManualBookingError("unknown", "Something went wrong extending this booking. Please try again.");
+  }
+}
+
+export interface RecordManualBookingPaymentInput {
+  readonly bookingId: string;
+  /** Minor units, must be positive and not exceed the remaining balance — validated server-side against the booking's real current state. */
+  readonly amountMinor: number;
+  /** Client-generated fresh per submission attempt; a retry must reuse the same key. */
+  readonly idempotencyKey: string;
+}
+
+export interface RecordManualBookingPaymentResult {
+  readonly bookingId: string;
+  readonly roomId: string;
+  readonly dateISO: string;
+  readonly amountRecordedMinor: number;
+  readonly totalAmountMinor: number;
+  readonly amountPaidMinor: number;
+  readonly balanceDueMinor: number;
+  readonly paymentStatus: "unpaid" | "partially_paid" | "paid";
+  readonly currency: "LKR";
+}
+
+/** Discriminated failure reasons the payment dialog needs to render distinct, honest messages for. */
+export type RecordManualBookingPaymentErrorReason =
+  | "not-found"
+  | "ineligible"
+  | "invalid-request"
+  | "idempotency-conflict"
+  | "unknown";
+
+export class RecordManualBookingPaymentError extends Error {
+  constructor(
+    public readonly reason: RecordManualBookingPaymentErrorReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RecordManualBookingPaymentError";
+  }
+}
+
+function mapRecordPaymentErrorCode(code: string): RecordManualBookingPaymentErrorReason {
+  switch (code) {
+    case "functions/not-found":
+      return "not-found";
+    case "functions/failed-precondition":
+      return "ineligible";
+    case "functions/invalid-argument":
+      return "invalid-request";
+    case "functions/already-exists":
+      return "idempotency-conflict";
+    default:
+      return "unknown";
+  }
+}
+
+const recordManualBookingPaymentCallable = httpsCallable<
+  RecordManualBookingPaymentInput,
+  RecordManualBookingPaymentResult
+>(functions, "recordManualBookingPayment");
+
+/**
+ * Staff or Owner — see functions/src/recordManualBookingPayment.ts. Records
+ * cash already received against a confirmed, staff/owner-entered manual
+ * booking — this does NOT collect payment itself. Rejects an amount that
+ * would overpay the booking's current balance, and rejects any attempt
+ * against a cancelled booking (docs/DECISIONS.md D17).
+ */
+export async function recordManualBookingPayment(
+  input: RecordManualBookingPaymentInput,
+): Promise<RecordManualBookingPaymentResult> {
+  try {
+    const result = await recordManualBookingPaymentCallable(input);
+    return result.data;
+  } catch (error) {
+    if (error instanceof FirebaseError) {
+      throw new RecordManualBookingPaymentError(mapRecordPaymentErrorCode(error.code), error.message);
+    }
+    throw new RecordManualBookingPaymentError("unknown", "Something went wrong recording this payment. Please try again.");
   }
 }

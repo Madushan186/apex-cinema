@@ -13,6 +13,7 @@ export { getAvailability } from "./getAvailability";
 export { getOwnerOverview } from "./getOwnerOverview";
 export { getPackages } from "./getPackages";
 export { getStaffSchedule } from "./getStaffSchedule";
+export { recordManualBookingPayment } from "./recordManualBookingPayment";
 
 export interface PingResponse {
   ok: true;

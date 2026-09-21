@@ -54,6 +54,8 @@ async function createManualBookingViaUI(
 
   await page.getByRole("button", { name: "Review booking" }).click();
   await expect(page.getByRole("heading", { name: "Review booking" })).toBeVisible();
+  // docs/DECISIONS.md D17 — must be explicitly checked before Confirm can proceed; never preselected.
+  await page.getByLabel(/cash advance/i).check();
   await page.getByRole("button", { name: "Confirm booking" }).click();
   await expect(page.getByRole("status").getByText("Booking confirmed")).toBeVisible({ timeout: 10_000 });
 
@@ -93,7 +95,7 @@ test.describe("staff manual-booking extension — real vite dev server @devmode 
     await expect(dialog.getByText("LKR 1,000")).toBeVisible(); // additional charge
     // AC Small is LKR 3,200 — new total after one extension is LKR 4,200.
     await expect(dialog.getByText("LKR 4,200")).toBeVisible();
-    await expect(page.getByText("Payment not recorded", { exact: false })).toBeVisible();
+    await expect(page.getByText("This does not record a payment", { exact: false })).toBeVisible();
 
     // Zero JS exceptions reached the console/page at any point so far —
     // this is what actually distinguishes "fixed" from "still broken" here,
@@ -109,7 +111,9 @@ test.describe("staff manual-booking extension — real vite dev server @devmode 
     await page.getByRole("button", { name: "Confirm extension" }).click();
     await expect(page.getByRole("heading", { name: "Extend this booking by 1 hour?" })).not.toBeVisible();
     await expect(page.getByText("12:00–16:00", { exact: false })).toBeVisible();
-    await expect(page.getByText("Unpaid", { exact: true })).toBeVisible();
+    // Partially paid (LKR 1,000 advance against a LKR 4,200 total after
+    // extension) — docs/DECISIONS.md D17, never "Unpaid" for a new booking.
+    await expect(page.getByText("Partially paid", { exact: false })).toBeVisible();
 
     expect(pageErrors, `Unexpected page errors after confirming: ${pageErrors.join("; ")}`).toHaveLength(0);
   });

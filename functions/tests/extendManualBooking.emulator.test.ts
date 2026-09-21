@@ -44,7 +44,9 @@ interface ManualBookingResult {
   currency: "LKR";
   startISO: string;
   endISO: string;
-  paymentStatus: "unpaid";
+  amountPaidMinor: number;
+  balanceDueMinor: number;
+  paymentStatus: "unpaid" | "partially_paid" | "paid";
 }
 
 interface ManualBookingRequest {
@@ -58,6 +60,7 @@ interface ManualBookingRequest {
   source: "staff_walkin" | "staff_phone";
   staffNote?: string;
   idempotencyKey: string;
+  advanceReceivedConfirmation: true;
   [extra: string]: unknown;
 }
 
@@ -73,6 +76,8 @@ interface ExtendResult {
   extensionCount: number;
   extensionChargesMinor: number;
   newTotalAmountMinor: number;
+  amountPaidMinor: number;
+  balanceDueMinor: number;
   currency: "LKR";
 }
 
@@ -127,6 +132,7 @@ function manualBooking(dateISO: string, time: string, overrides: Partial<ManualB
     source: "staff_walkin",
     staffNote: "",
     idempotencyKey: `extend-test-create-${Math.random().toString(36).slice(2)}`,
+    advanceReceivedConfirmation: true,
     ...overrides,
   };
 }
@@ -225,7 +231,13 @@ describe("staff and owner can extend a valid manual reservation", () => {
     expect(booking?.roomId).toBe(created.data.roomId);
     expect(booking?.startMinute).toBe(9 * 60);
     expect(booking?.peopleCount).toBe(2);
-    expect(booking?.paymentStatus).toBe("unpaid");
+    // docs/DECISIONS.md D17 — created with the LKR 1,000 advance recorded,
+    // so this is partially_paid immediately, never "unpaid"; extension
+    // never touches amountPaidMinor or paymentStatus.
+    expect(booking?.paymentStatus).toBe("partially_paid");
+    expect(booking?.amountPaidMinor).toBe(created.data.amountPaidMinor);
+    expect(result.data.amountPaidMinor).toBe(created.data.amountPaidMinor);
+    expect(result.data.balanceDueMinor).toBe(result.data.newTotalAmountMinor - result.data.amountPaidMinor);
 
     const extensionsSnap = await db.collection(COLLECTIONS.bookings).doc(created.data.bookingId).collection("extensions").get();
     expect(extensionsSnap.docs).toHaveLength(1);
@@ -394,13 +406,43 @@ describe("ineligible bookings are rejected", () => {
   });
 
   it("rejects an already-cancelled booking", async () => {
-    await signInAs(STAFF_EMAIL);
+    // Direct Firestore write bypassing the real create+cancel flow —
+    // docs/DECISIONS.md D17 means a REAL createManualBooking-created
+    // booking always carries a recorded advance and can no longer be
+    // cancelled through cancelManualBooking (see cancelManualBooking's own
+    // test file), so this sets up the "already cancelled" state directly,
+    // purely to prove extension rejects it.
+    const db = getFirestore();
     const dateISO = addDaysToColomboToday(249);
-    const created = await createManualBooking(manualBooking(dateISO, "09:00"));
-    await cancelManualBooking({ bookingId: created.data.bookingId, reason: "No longer needed" });
+    const bookingRef = db.collection(COLLECTIONS.bookings).doc();
+    await bookingRef.set({
+      packageId: "ac-small",
+      roomId: "room-4",
+      dateISO,
+      startMinute: 9 * 60,
+      endMinute: 12 * 60,
+      bookingStatus: "cancelled",
+      paymentStatus: "unpaid",
+      totalAmountMinor: 320000,
+      currency: "LKR",
+      peopleCount: 2,
+      customerName: "Synthetic Already-Cancelled Test",
+      customerPhone: "0770000004",
+      customerEmail: "",
+      referenceCode: "APX-SYNTHETIC-CANCELLED",
+      source: "staff_walkin",
+      createdBy: "synthetic-test-setup",
+      staffNote: "",
+      cancelledAtMillis: Date.now(),
+      cancelledBy: "synthetic-test-setup",
+      cancellationReason: "Synthetic setup",
+      idempotencyKey: `synthetic-cancelled-${Math.random().toString(36).slice(2)}`,
+      createdAt: new Date(),
+    });
 
+    await signInAs(STAFF_EMAIL);
     await expect(
-      extendManualBooking({ bookingId: created.data.bookingId, expectedCurrentEndMinute: 12 * 60, idempotencyKey: extendKey() }),
+      extendManualBooking({ bookingId: bookingRef.id, expectedCurrentEndMinute: 12 * 60, idempotencyKey: extendKey() }),
     ).rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
 
@@ -445,7 +487,10 @@ describe("ineligible bookings are rejected", () => {
     ).rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
 
-  it("rejects a booking whose paymentStatus is not unpaid, even by direct data manipulation", async () => {
+  it("rejects a booking whose paymentStatus is an online/PayHere state, even by direct data manipulation — defense-in-depth", async () => {
+    // docs/DECISIONS.md D17 — unpaid, partially_paid, and paid are all
+    // extendable; only a state that should never appear on a manual
+    // booking at all (an online/PayHere payment state) is rejected.
     await signInAs(STAFF_EMAIL);
     const dateISO = addDaysToColomboToday(252);
     const created = await createManualBooking(manualBooking(dateISO, "09:00"));
@@ -456,6 +501,42 @@ describe("ineligible bookings are rejected", () => {
     await expect(
       extendManualBooking({ bookingId: created.data.bookingId, expectedCurrentEndMinute: 12 * 60, idempotencyKey: extendKey() }),
     ).rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("extends a partially_paid booking (the normal case now) and a fully paid booking alike, growing the total/balance but never the amount paid", async () => {
+    await signInAs(STAFF_EMAIL);
+    const dateISO = addDaysToColomboToday(260);
+    const created = await createManualBooking(manualBooking(dateISO, "09:00"));
+    expect(created.data.paymentStatus).toBe("partially_paid"); // the real, normal post-D17 state
+
+    const partiallyPaidExtension = await extendManualBooking({
+      bookingId: created.data.bookingId,
+      expectedCurrentEndMinute: 12 * 60,
+      idempotencyKey: extendKey(),
+    });
+    expect(partiallyPaidExtension.data.amountPaidMinor).toBe(created.data.amountPaidMinor); // unchanged
+    expect(partiallyPaidExtension.data.balanceDueMinor).toBe(
+      partiallyPaidExtension.data.newTotalAmountMinor - created.data.amountPaidMinor,
+    );
+
+    // Now mark it fully paid (direct data manipulation — no real "pay the
+    // rest" call in this test file, that's recordManualBookingPayment's own
+    // test file) and extend it again — still allowed.
+    const db = getFirestore();
+    await db.collection(COLLECTIONS.bookings).doc(created.data.bookingId).update({
+      amountPaidMinor: partiallyPaidExtension.data.newTotalAmountMinor,
+      paymentStatus: "paid",
+    });
+    const paidExtension = await extendManualBooking({
+      bookingId: created.data.bookingId,
+      expectedCurrentEndMinute: 13 * 60,
+      idempotencyKey: extendKey(),
+    });
+    expect(paidExtension.data.newEndMinute).toBe(14 * 60);
+    // The amount paid is untouched by extension even though the booking was
+    // fully paid a moment ago — the new charge only grows the balance.
+    expect(paidExtension.data.amountPaidMinor).toBe(partiallyPaidExtension.data.newTotalAmountMinor);
+    expect(paidExtension.data.balanceDueMinor).toBe(100_000); // exactly this extension's own LKR 1,000 fee
   });
 
   it("allows extending a booking that is currently in progress (started but not yet ended)", async () => {
@@ -685,17 +766,51 @@ describe("extension racing with another booking cannot double-book", () => {
 
 describe("cancellation releases the entire extended interval", () => {
   it("cancelling an extended booking frees the full extended range, not just the original range", async () => {
-    await signInAs(STAFF_EMAIL);
-    const dateISO = addDaysToColomboToday(259);
-    const created = await createManualBooking(manualBooking(dateISO, "09:00", { packageId: "ac-large" }));
-    await extendManualBooking({ bookingId: created.data.bookingId, expectedCurrentEndMinute: 12 * 60, idempotencyKey: extendKey() });
-
-    await cancelManualBooking({ bookingId: created.data.bookingId, reason: "Freeing the full extended slot" });
-
+    // Built as a legacy-unpaid booking (direct Firestore write, matching
+    // this file's other synthetic-state tests) rather than via the real
+    // createManualBooking — docs/DECISIONS.md D17 means a REAL created
+    // booking always carries a recorded advance and can no longer reach
+    // cancelManualBooking successfully (see cancelManualBooking's own test
+    // file for that behavior); this test is specifically about extension +
+    // cancellation composing correctly on a booking that CAN be cancelled.
     const db = getFirestore();
-    const invSnap = await db.collection(COLLECTIONS.inventory).doc(inventoryDocId(created.data.roomId, dateISO)).get();
+    const dateISO = addDaysToColomboToday(259);
+    const bookingRef = db.collection(COLLECTIONS.bookings).doc();
+    await bookingRef.set({
+      packageId: "ac-large",
+      roomId: "room-5",
+      dateISO,
+      startMinute: 9 * 60,
+      endMinute: 12 * 60,
+      bookingStatus: "confirmed",
+      paymentStatus: "unpaid",
+      totalAmountMinor: 450000,
+      currency: "LKR",
+      peopleCount: 2,
+      customerName: "Legacy Extend-Then-Cancel Test",
+      customerPhone: "0770000005",
+      customerEmail: "",
+      referenceCode: "APX-SYNTHETIC-EXTENDCANCEL",
+      source: "staff_walkin",
+      createdBy: "synthetic-test-setup",
+      staffNote: "",
+      idempotencyKey: `synthetic-extendcancel-${Math.random().toString(36).slice(2)}`,
+      createdAt: new Date(),
+    });
+    const inventoryRef = db.collection(COLLECTIONS.inventory).doc(inventoryDocId("room-5", dateISO));
+    await inventoryRef.set({
+      roomId: "room-5",
+      dateISO,
+      intervals: [{ bookingId: bookingRef.id, startMinute: 9 * 60, endMinute: 12 * 60, status: "confirmed", holdExpiresAtMillis: null }],
+    });
+
+    await signInAs(STAFF_EMAIL);
+    await extendManualBooking({ bookingId: bookingRef.id, expectedCurrentEndMinute: 12 * 60, idempotencyKey: extendKey() });
+    await cancelManualBooking({ bookingId: bookingRef.id, reason: "Freeing the full extended slot" });
+
+    const invSnap = await inventoryRef.get();
     const intervals = (invSnap.data()?.intervals ?? []) as Array<Record<string, unknown>>;
-    const released = intervals.find((i) => i.bookingId === created.data.bookingId);
+    const released = intervals.find((i) => i.bookingId === bookingRef.id);
     expect(released?.status).toBe("cancelled");
     expect(released?.endMinute).toBe(13 * 60); // the EXTENDED end time, not the original 12:00
 
@@ -703,6 +818,6 @@ describe("cancellation releases the entire extended interval", () => {
     // (inside the previously-extended range) — proving the release
     // actually covers the full extended interval, not just [09:00, 12:00).
     const rebooked = await createManualBooking(manualBooking(dateISO, "12:00", { packageId: "ac-large" }));
-    expect(rebooked.data.roomId).toBe(created.data.roomId);
+    expect(rebooked.data.roomId).toBe("room-5");
   });
 });

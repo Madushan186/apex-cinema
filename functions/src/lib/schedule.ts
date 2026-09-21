@@ -1,4 +1,5 @@
 import type { PackageId, PaymentStatus } from "@apex-cinema/booking-core";
+import { currentBookingTotalMinor } from "@apex-cinema/booking-core";
 import { COLLECTIONS, db } from "./firestore";
 
 /**
@@ -44,6 +45,10 @@ export interface ScheduleBooking {
   readonly extensionCount: number;
   /** Sum of all extension fees, minor units — 0 if none. */
   readonly extensionChargesMinor: number;
+  /** Running total actually paid (cash advance + any later recorded payment), minor units. 0 on a booking with no payment recorded — never null once totalAmountMinor is present (docs/DECISIONS.md D17). */
+  readonly amountPaidMinor: number;
+  /** (totalAmountMinor + extensionChargesMinor) - amountPaidMinor, computed — null only when totalAmountMinor itself is null (an online hold/booking, which has no manual-booking payment ledger this phase). */
+  readonly balanceDueMinor: number | null;
 }
 
 interface RawBooking {
@@ -64,6 +69,7 @@ interface RawBooking {
   totalAmountMinor?: number;
   extensionCount?: number;
   extensionChargesMinor?: number;
+  amountPaidMinor?: number;
 }
 
 /**
@@ -99,6 +105,8 @@ export async function getBookingsForDate(dateISO: string): Promise<readonly Sche
   const nowMillis = Date.now();
   const bookings = snapshot.docs.map((doc) => {
     const raw = doc.data() as RawBooking;
+    const extensionChargesMinor = raw.extensionChargesMinor ?? 0;
+    const amountPaidMinor = raw.amountPaidMinor ?? 0;
     const booking: ScheduleBooking = {
       bookingId: doc.id,
       packageId: raw.packageId,
@@ -116,7 +124,12 @@ export async function getBookingsForDate(dateISO: string): Promise<readonly Sche
       cancellationReason: raw.cancellationReason ?? null,
       totalAmountMinor: raw.totalAmountMinor ?? null,
       extensionCount: raw.extensionCount ?? 0,
-      extensionChargesMinor: raw.extensionChargesMinor ?? 0,
+      extensionChargesMinor,
+      amountPaidMinor,
+      balanceDueMinor:
+        raw.totalAmountMinor === undefined
+          ? null
+          : currentBookingTotalMinor(raw.totalAmountMinor, extensionChargesMinor) - amountPaidMinor,
     };
     return booking;
   });

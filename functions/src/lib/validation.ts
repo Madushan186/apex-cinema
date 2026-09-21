@@ -113,13 +113,24 @@ export interface ValidatedManualBookingRequest {
   /** "" when not supplied. */
   readonly staffNote: string;
   readonly idempotencyKey: string;
+  /**
+   * Must be the literal `true` — docs/DECISIONS.md D17: every new booking
+   * requires the LKR 1,000 cash advance before confirmation. This is a
+   * staff attestation ("I have received this cash"), never a client-supplied
+   * amount — the amount itself is always the server's own
+   * ADVANCE_AMOUNT_LKR constant, never read from the request.
+   */
+  readonly advanceReceivedConfirmation: true;
 }
 
 /**
- * Same shape/strictness as validateHoldRequest, with two differences that
+ * Same shape/strictness as validateHoldRequest, with three differences that
  * match this phase's brief: email is optional (not every phone/walk-in
- * customer will give one), and a required `source` (phone or walk-in only —
- * no "party" source exists this phase, see docs/PROGRESS.md scope).
+ * customer will give one), a required `source` (phone or walk-in only —
+ * no "party" source exists this phase, see docs/PROGRESS.md scope), and a
+ * required, literal `advanceReceivedConfirmation: true` (docs/DECISIONS.md
+ * D17) — rejected outright, before any Firestore read, if missing or falsy,
+ * so an unconfirmed advance can never reach the transaction at all.
  */
 export function validateManualBookingRequest(data: unknown): ValidatedManualBookingRequest {
   if (!data || typeof data !== "object") invalid("Request body must be an object.");
@@ -174,6 +185,14 @@ export function validateManualBookingRequest(data: unknown): ValidatedManualBook
     invalid("A valid idempotency key is required.");
   }
 
+  // Must be the literal boolean true — not "yes", not 1, not merely
+  // truthy — so a UI bug or a curious client can't send some other
+  // truthy-looking value and have it silently accepted (docs/DECISIONS.md
+  // D17: this is a staff attestation, never preselected or implied).
+  if (d.advanceReceivedConfirmation !== true) {
+    invalid("You must confirm the LKR 1,000 cash advance was received before creating this booking.");
+  }
+
   return {
     packageId,
     dateISO,
@@ -185,6 +204,7 @@ export function validateManualBookingRequest(data: unknown): ValidatedManualBook
     source,
     staffNote,
     idempotencyKey: d.idempotencyKey as string,
+    advanceReceivedConfirmation: true,
   };
 }
 
@@ -260,6 +280,58 @@ export function validateExtendManualBookingRequest(data: unknown): ValidatedExte
   return {
     bookingId: d.bookingId as string,
     expectedCurrentEndMinute: d.expectedCurrentEndMinute as number,
+    idempotencyKey: d.idempotencyKey as string,
+  };
+}
+
+// Generous sanity bound, not a real business limit — the actual "can't pay
+// more than the remaining balance" check happens server-side inside the
+// transaction against the booking's own real total (see
+// lib/payments.ts). LKR 500,000 minor units = LKR 5,000 — comfortably above
+// any single package's full price plus several extensions.
+const MAX_PAYMENT_AMOUNT_MINOR = 500_000;
+
+export interface ValidatedRecordPaymentRequest {
+  readonly bookingId: string;
+  readonly amountMinor: number;
+  readonly idempotencyKey: string;
+}
+
+/**
+ * Validates only shape/presence — bookingId a plausible id string,
+ * amountMinor a positive bounded integer, idempotency key length-bounded.
+ * Every actual eligibility rule (booking exists, is a manual/confirmed
+ * booking, not cancelled, and — crucially — that this amount doesn't
+ * overpay the booking's real current balance) is checked server-side inside
+ * recordManualBookingPaymentTransactional, which needs to read the booking
+ * doc anyway (docs/DECISIONS.md D17).
+ */
+export function validateRecordPaymentRequest(data: unknown): ValidatedRecordPaymentRequest {
+  if (!data || typeof data !== "object") invalid("Request body must be an object.");
+  const d = data as Record<string, unknown>;
+
+  if (typeof d.bookingId !== "string" || !BOOKING_ID_PATTERN.test(d.bookingId)) {
+    invalid("A valid bookingId is required.");
+  }
+  if (
+    typeof d.amountMinor !== "number" ||
+    !Number.isInteger(d.amountMinor) ||
+    d.amountMinor <= 0 ||
+    d.amountMinor > MAX_PAYMENT_AMOUNT_MINOR
+  ) {
+    invalid("A valid, positive payment amount is required.");
+  }
+  if (
+    typeof d.idempotencyKey !== "string" ||
+    d.idempotencyKey.length < MIN_IDEMPOTENCY_KEY_LENGTH ||
+    d.idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH
+  ) {
+    invalid("A valid idempotency key is required.");
+  }
+
+  return {
+    bookingId: d.bookingId as string,
+    amountMinor: d.amountMinor as number,
     idempotencyKey: d.idempotencyKey as string,
   };
 }

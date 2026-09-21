@@ -70,3 +70,22 @@ export function fingerprintExtensionRequest(input: {
   const canonical = [input.actorUid, input.bookingId, input.expectedCurrentEndMinute].join("|");
   return createHash("sha256").update(canonical).digest("hex");
 }
+
+/**
+ * Same purpose as fingerprintExtensionRequest, for recordManualBookingPayment
+ * (docs/DECISIONS.md D17). A payment is a "create a new resource" operation
+ * like hold/manual-booking creation (each approval is a new, distinct
+ * payment record) rather than a repeatable state transition like extension,
+ * so this doesn't need an "expected current value" field — the overpayment
+ * check inside the transaction always reads the booking's real current
+ * amountPaidMinor fresh, which is what actually prevents a concurrent race
+ * from double-applying (see lib/payments.ts).
+ */
+export function fingerprintPaymentRequest(input: {
+  actorUid: string;
+  bookingId: string;
+  amountMinor: number;
+}): string {
+  const canonical = [input.actorUid, input.bookingId, input.amountMinor].join("|");
+  return createHash("sha256").update(canonical).digest("hex");
+}

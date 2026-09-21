@@ -31,6 +31,10 @@ export const COLLECTIONS = {
   extensionIdempotency: "extensionIdempotency",
   /** Subcollection name under bookings/{bookingId} — one doc per approved extension (docs/ARCHITECTURE.md §3, now implemented). */
   bookingExtensions: "extensions",
+  /** Subcollection name under bookings/{bookingId} — one doc per recorded cash payment (the advance, plus any later staff-recorded payment). See docs/DECISIONS.md D17. */
+  bookingPayments: "payments",
+  /** Idempotency records for recordManualBookingPayment — kept separate from every other idempotency collection, same reasoning as manualBookingIdempotency/extensionIdempotency. */
+  paymentIdempotency: "paymentIdempotency",
   rateLimits: "rateLimits",
   config: "config",
   /** Append-only, Cloud-Functions-only writes (docs/ARCHITECTURE.md §3, docs/SECURITY.md §8). No customer PII — see lib/inventory.ts's manual-booking audit write. */

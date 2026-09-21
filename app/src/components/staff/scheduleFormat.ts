@@ -61,7 +61,12 @@ const MANUAL_BOOKING_SOURCES = new Set(["staff_walkin", "staff_phone"]);
 export function isCancelEligible(booking: ScheduleBooking, scheduleDateISO: string): boolean {
   if (booking.displayStatus !== "confirmed") return false;
   if (!booking.source || !MANUAL_BOOKING_SOURCES.has(booking.source)) return false;
-  if (booking.paymentStatus !== "unpaid") return false;
+  // docs/DECISIONS.md D17 — a booking with ANY recorded payment is blocked
+  // from cancellation until a refund policy exists. Every booking created
+  // under D17 has a recorded advance, so this button never shows for a new
+  // booking; a booking created before D17 (amountPaidMinor 0/absent) is
+  // still cancellable exactly as before.
+  if (booking.amountPaidMinor > 0) return false;
   if (booking.roomId === PARTY_ROOM_ID) return false;
 
   const todayISO = getColomboTodayISO();
@@ -81,10 +86,15 @@ export function isCancelEligible(booking: ScheduleBooking, scheduleDateISO: stri
  * bounce off the closing-time check): the new end time must still fit
  * before 21:00.
  */
+const MANUAL_BOOKING_PAYMENT_STATES = new Set(["unpaid", "partially_paid", "paid"]);
+
 export function isExtendEligible(booking: ScheduleBooking, scheduleDateISO: string): boolean {
   if (booking.displayStatus !== "confirmed") return false;
   if (!booking.source || !MANUAL_BOOKING_SOURCES.has(booking.source)) return false;
-  if (booking.paymentStatus !== "unpaid") return false;
+  // docs/DECISIONS.md D17 — unpaid, partially paid, and fully paid bookings
+  // are all extendable; only an online/PayHere payment state (which a
+  // manual booking should never actually carry) hides this button.
+  if (!booking.paymentStatus || !MANUAL_BOOKING_PAYMENT_STATES.has(booking.paymentStatus)) return false;
   if (booking.roomId === PARTY_ROOM_ID) return false;
   if (booking.endMinute + EXTENSION_MINUTES > CLOSE_MINUTE) return false;
 
@@ -92,4 +102,21 @@ export function isExtendEligible(booking: ScheduleBooking, scheduleDateISO: stri
   const nowMinute = getColomboMinuteOfDay();
   const hasEnded = scheduleDateISO < todayISO || (scheduleDateISO === todayISO && booking.endMinute <= nowMinute);
   return !hasEnded;
+}
+
+/**
+ * Cosmetic-only eligibility check for whether to show a "Record payment"
+ * action — mirrors functions/src/lib/payments.ts's
+ * recordManualBookingPaymentTransactional rules (docs/DECISIONS.md D17),
+ * plus a UI-only convenience: hidden once the balance is already 0 (there
+ * is nothing left to record), same reasoning as the server's own "a
+ * positive amount is required" check. No time-window restriction — a
+ * payment can be recorded any time the booking is confirmed, including
+ * after the session has ended.
+ */
+export function isPaymentEligible(booking: ScheduleBooking): boolean {
+  if (booking.displayStatus !== "confirmed") return false;
+  if (!booking.source || !MANUAL_BOOKING_SOURCES.has(booking.source)) return false;
+  if (booking.roomId === PARTY_ROOM_ID) return false;
+  return (booking.balanceDueMinor ?? 0) > 0;
 }

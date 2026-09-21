@@ -25,6 +25,47 @@ export const DEFAULT_HOLD_DURATION_MINUTES = 10;
 export const EXTENSION_FEE_LKR = 1000;
 export const EXTENSION_MINUTES = 60;
 
+/**
+ * Business decision (docs/DECISIONS.md D17, owner-approved): every new
+ * booking — online, phone, walk-in, and eventually Party — requires this
+ * advance before confirmation. It is part of the package total, not an
+ * extra fee: a staff-entered booking's balance due is
+ * `total - amountPaidMinor`, and the advance counts directly against that
+ * total from the moment it's recorded. Shared here (not read from
+ * `config/booking`) for the same reason as EXTENSION_FEE_LKR above — the
+ * marketing copy, the staff booking flow, and the server-side charge
+ * computation can never drift apart. Supersedes the prior D14 permission to
+ * create a confirmed-but-unpaid manual booking — see D17.
+ */
+export const ADVANCE_AMOUNT_LKR = 1000;
+
+/**
+ * The current amount actually owed on a booking, in minor units — the
+ * original package price plus every approved extension's charge (D16).
+ * Never a third stored grand-total field; always computed from the two
+ * numbers it's derived from, so it can't drift out of sync with either.
+ */
+export function currentBookingTotalMinor(totalAmountMinor: number, extensionChargesMinor: number): number {
+  return totalAmountMinor + extensionChargesMinor;
+}
+
+/**
+ * Derives a manual booking's payment status from its actual paid amount
+ * against its current total (docs/DECISIONS.md D17) — never a
+ * separately-stored field that could drift from the payment ledger it
+ * summarizes. Only ever returns one of these three values; the wider
+ * `PaymentStatus` type also carries the online/PayHere states, which this
+ * function never produces.
+ */
+export function derivePaymentStatus(
+  amountPaidMinor: number,
+  currentTotalMinor: number,
+): "unpaid" | "partially_paid" | "paid" {
+  if (amountPaidMinor <= 0) return "unpaid";
+  if (amountPaidMinor >= currentTotalMinor) return "paid";
+  return "partially_paid";
+}
+
 const PUBLIC_START_MINUTES: readonly number[] = SLOT_TIMES.map(slotTimeToMinutes);
 
 export function isPublicStartTime(time: string): time is SlotTime {

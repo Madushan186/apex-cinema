@@ -1,3 +1,4 @@
+import { ADVANCE_AMOUNT_LKR } from "@apex-cinema/booking-core";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 import type { PackageDefinition, SlotTime } from "@/data/types";
@@ -17,6 +18,9 @@ export function ManualBookingReview({
   value,
   submitting,
   errorMessage,
+  advanceReceived,
+  advanceTouched,
+  onAdvanceReceivedChange,
   onBack,
   onConfirm,
 }: {
@@ -24,6 +28,11 @@ export function ManualBookingReview({
   value: ManualBookingFormInput;
   submitting: boolean;
   errorMessage: string | null;
+  /** Docs/DECISIONS.md D17 — must be explicitly checked by staff; never preselected. */
+  advanceReceived: boolean;
+  /** True once the staff member has tried to confirm at least once — gates showing the "must confirm" validation message. */
+  advanceTouched: boolean;
+  onAdvanceReceivedChange: (checked: boolean) => void;
   onBack: () => void;
   onConfirm: () => void;
 }) {
@@ -31,6 +40,7 @@ export function ManualBookingReview({
   const time = value.time as SlotTime;
   const sessionMinutes = pkg.sessionMinutes ?? 180;
   const endTime = formatEndTime(time, sessionMinutes);
+  const balanceAfterAdvanceLKR = pkg.priceLKR - ADVANCE_AMOUNT_LKR;
 
   const rows: [string, string][] = [
     [t("booking.review.packageLabel"), t(`packages.tiers.${pkg.id}.name`)],
@@ -46,6 +56,8 @@ export function ManualBookingReview({
   if (value.staffNote.trim()) {
     rows.push([t("staff.manualBooking.noteReviewLabel"), value.staffNote.trim()]);
   }
+
+  const advanceError = advanceTouched && !advanceReceived ? t("staff.manualBooking.advanceCheckboxError") : null;
 
   return (
     <div className="flex flex-col gap-6">
@@ -64,9 +76,36 @@ export function ManualBookingReview({
             {t("packages.priceLabel", { price: pkg.priceLKR.toLocaleString("en-LK") })}
           </dd>
         </div>
+        <div className="flex items-center justify-between gap-4 px-4 py-3">
+          <dt className="text-sm text-muted-foreground">{t("staff.manualBooking.advanceAmountLabel")}</dt>
+          <dd className="text-sm font-medium text-foreground">
+            {t("packages.priceLabel", { price: ADVANCE_AMOUNT_LKR.toLocaleString("en-LK") })}
+          </dd>
+        </div>
+        <div className="flex items-center justify-between gap-4 px-4 py-3">
+          <dt className="text-sm text-muted-foreground">{t("staff.manualBooking.balanceAfterAdvanceLabel")}</dt>
+          <dd className="text-sm font-medium text-foreground">
+            {t("packages.priceLabel", { price: balanceAfterAdvanceLKR.toLocaleString("en-LK") })}
+          </dd>
+        </div>
       </dl>
 
-      <Notice variant="warning">{t("staff.manualBooking.unpaidNotice")}</Notice>
+      <Notice variant="warning">{t("staff.manualBooking.advanceRequiredNotice")}</Notice>
+
+      <label className="flex items-start gap-2.5 rounded-lg border border-border-subtle bg-card p-3.5 text-sm">
+        <input
+          type="checkbox"
+          checked={advanceReceived}
+          disabled={submitting}
+          onChange={(event) => onAdvanceReceivedChange(event.target.checked)}
+          className="mt-0.5 size-4 shrink-0 accent-gold"
+        />
+        <span className="flex flex-col gap-1">
+          <span className="font-medium text-foreground">{t("staff.manualBooking.advanceCheckboxLabel")}</span>
+          <span className="text-xs text-muted-foreground">{t("staff.manualBooking.advanceCheckboxHint")}</span>
+        </span>
+      </label>
+      {advanceError ? <p className="text-xs text-status-negative">{advanceError}</p> : null}
 
       {errorMessage ? <Notice variant="error">{errorMessage}</Notice> : null}
 

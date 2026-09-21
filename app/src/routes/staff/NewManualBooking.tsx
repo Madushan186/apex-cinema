@@ -63,6 +63,10 @@ function NewManualBookingBody() {
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [result, setResult] = useState<ManualBookingResult | null>(null);
+  // docs/DECISIONS.md D17 — never preselected; staff must explicitly check
+  // this before a booking can be created.
+  const [advanceReceived, setAdvanceReceived] = useState(false);
+  const [advanceTouched, setAdvanceTouched] = useState(false);
 
   const selectedPackage = (packages ?? []).find((pkg) => pkg.id === form.packageId) ?? null;
   const packagesUnavailable = packagesLoading || Boolean(packagesError) || (packages ?? []).length === 0;
@@ -80,6 +84,8 @@ function NewManualBookingBody() {
 
   async function handleConfirm() {
     if (!form.packageId || !form.dateISO || !form.time || form.peopleCount === null || !idempotencyKey) return;
+    setAdvanceTouched(true);
+    if (!advanceReceived) return; // docs/DECISIONS.md D17 — cannot proceed without explicit confirmation.
     setSubmitting(true);
     setErrorMessage(null);
     try {
@@ -94,6 +100,7 @@ function NewManualBookingBody() {
         source: form.source,
         staffNote: form.staffNote.trim(),
         idempotencyKey,
+        advanceReceivedConfirmation: true,
       });
       setResult(response);
       setPhase("success");
@@ -113,6 +120,8 @@ function NewManualBookingBody() {
     setIdempotencyKey(null);
     setErrorMessage(null);
     setResult(null);
+    setAdvanceReceived(false);
+    setAdvanceTouched(false);
     setPhase("form");
   }
 
@@ -134,13 +143,30 @@ function NewManualBookingBody() {
             </dd>
           </div>
           <div className="flex items-center justify-between gap-4 px-4 py-3">
+            <dt className="text-sm text-muted-foreground">{t("staff.manualBooking.successAdvanceLabel")}</dt>
+            <dd className="text-sm font-medium text-foreground">
+              {t("packages.priceLabel", { price: (result.amountPaidMinor / 100).toLocaleString("en-LK") })}
+            </dd>
+          </div>
+          <div className="flex items-center justify-between gap-4 px-4 py-3">
+            <dt className="text-sm text-muted-foreground">{t("staff.manualBooking.successBalanceLabel")}</dt>
+            <dd className="text-sm font-medium text-foreground">
+              {t("packages.priceLabel", { price: (result.balanceDueMinor / 100).toLocaleString("en-LK") })}
+            </dd>
+          </div>
+          <div className="flex items-center justify-between gap-4 px-4 py-3">
             <dt className="text-sm text-muted-foreground">{t("staff.manualBooking.successStatusLabel")}</dt>
-            <dd className="text-sm font-medium text-foreground">{t("staff.unpaidBadge")}</dd>
+            <dd className="text-sm font-medium text-foreground">
+              {t(
+                result.paymentStatus === "paid"
+                  ? "staff.paidBadge"
+                  : result.paymentStatus === "partially_paid"
+                    ? "staff.partiallyPaidBadge"
+                    : "staff.unpaidBadge",
+              )}
+            </dd>
           </div>
         </dl>
-        <Notice variant="warning" className="mt-4">
-          {t("staff.manualBooking.unpaidNotice")}
-        </Notice>
         <div className="mt-6 flex flex-wrap gap-3">
           <Button onClick={() => navigate(`/staff?date=${form.dateISO}`)}>{t("staff.backToSchedule")}</Button>
           <Button variant="outline" onClick={handleCreateAnother}>
@@ -180,6 +206,12 @@ function NewManualBookingBody() {
             value={form}
             submitting={submitting}
             errorMessage={errorMessage}
+            advanceReceived={advanceReceived}
+            advanceTouched={advanceTouched}
+            onAdvanceReceivedChange={(checked) => {
+              setAdvanceReceived(checked);
+              if (checked) setAdvanceTouched(false);
+            }}
             onBack={() => setPhase("form")}
             onConfirm={() => void handleConfirm()}
           />

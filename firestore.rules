@@ -79,6 +79,17 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /paymentIdempotency/{key} {
+      allow read, write: if false;
+    }
+
+    // Recorded cash payments (docs/DECISIONS.md D17) — same PII/financial
+    // sensitivity as the parent booking and the extensions subcollection
+    // above; never client-readable or writable, for the same reasoning.
+    match /bookings/{bookingId}/payments/{paymentId} {
+      allow read, write: if false;
+    }
+
     match /rateLimits/{key} {
       allow read, write: if false;
     }

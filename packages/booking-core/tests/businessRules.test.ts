@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  ADVANCE_AMOUNT_LKR,
   CLOSE_MINUTE,
   OPEN_MINUTE,
   computeEndMinute,
+  currentBookingTotalMinor,
+  derivePaymentStatus,
   endsWithinBusinessHours,
   isPublicStartMinute,
   isPublicStartTime,
@@ -82,5 +85,33 @@ describe("isValidPeopleCount", () => {
     expect(isValidPeopleCount(-1, 3)).toBe(false);
     expect(isValidPeopleCount(1.5, 3)).toBe(false);
     expect(isValidPeopleCount(4, 3)).toBe(false);
+  });
+});
+
+describe("ADVANCE_AMOUNT_LKR", () => {
+  it("is LKR 1,000 (docs/DECISIONS.md D17)", () => {
+    expect(ADVANCE_AMOUNT_LKR).toBe(1000);
+  });
+});
+
+describe("currentBookingTotalMinor", () => {
+  it("is the original price plus extension charges, never a third stored field", () => {
+    expect(currentBookingTotalMinor(320000, 0)).toBe(320000);
+    expect(currentBookingTotalMinor(320000, 100000)).toBe(420000);
+  });
+});
+
+describe("derivePaymentStatus", () => {
+  it("is unpaid at zero paid", () => {
+    expect(derivePaymentStatus(0, 320000)).toBe("unpaid");
+  });
+
+  it("is partially_paid between zero and the total", () => {
+    expect(derivePaymentStatus(100000, 320000)).toBe("partially_paid");
+  });
+
+  it("is paid once amount paid reaches (or, defensively, exceeds) the total", () => {
+    expect(derivePaymentStatus(320000, 320000)).toBe("paid");
+    expect(derivePaymentStatus(400000, 320000)).toBe("paid");
   });
 });

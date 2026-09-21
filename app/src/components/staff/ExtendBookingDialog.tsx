@@ -143,7 +143,7 @@ export function ExtendBookingDialog({
           </div>
         </dl>
 
-        <Notice variant="warning">{t("staff.extendBooking.unpaidNotice")}</Notice>
+        <Notice variant="warning">{t("staff.extendBooking.balanceNotice")}</Notice>
 
         {errorMessage ? <Notice variant="error">{errorMessage}</Notice> : null}
 

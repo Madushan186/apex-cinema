@@ -17,14 +17,19 @@ export type BookingStatus =
 
 /**
  * See docs/ARCHITECTURE.md §4 "Payment status" state diagram.
- * "unpaid" (docs/DECISIONS.md D14) is a manual-reservation-only state: no
- * online payment attempt has happened at all (distinct from every other
- * value here, which all imply an online PayHere attempt was made). It is
- * fixed at booking creation and cannot be edited this phase — recording an
- * actual payment is out of scope until a payment-confirmation function exists.
+ * "unpaid" | "partially_paid" | "paid" (docs/DECISIONS.md D14, D17) are the
+ * manual-reservation payment ledger's own three states, derived from a
+ * booking's `amountPaidMinor` against its current total — no online payment
+ * attempt has happened at all for these (distinct from every other value
+ * here, which all imply an online PayHere attempt was made). "unpaid" is
+ * only ever seen on a booking created before D17 (the LKR 1,000 advance
+ * requirement) — every booking created under D17 starts "partially_paid" or
+ * "paid" immediately, never "unpaid".
  */
 export type PaymentStatus =
   | "unpaid"
+  | "partially_paid"
+  | "paid"
   | "initiated"
   | "pending"
   | "succeeded"
