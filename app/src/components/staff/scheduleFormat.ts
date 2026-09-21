@@ -1,3 +1,4 @@
+import { CLOSE_MINUTE, EXTENSION_MINUTES } from "@apex-cinema/booking-core";
 import type { DisplayStatus, ScheduleBooking } from "@/data/firebase/staffApi";
 import { getColomboMinuteOfDay, getColomboTodayISO } from "@/lib/colomboTime";
 
@@ -67,4 +68,28 @@ export function isCancelEligible(booking: ScheduleBooking, scheduleDateISO: stri
   const nowMinute = getColomboMinuteOfDay();
   const hasStarted = scheduleDateISO < todayISO || (scheduleDateISO === todayISO && booking.startMinute <= nowMinute);
   return !hasStarted;
+}
+
+/**
+ * Cosmetic-only eligibility check for whether to show an "Extend +1 hour"
+ * action — mirrors functions/src/lib/inventory.ts's
+ * extendManualBookingTransactional rules exactly, but this is NOT the
+ * actual control (docs/SECURITY.md §3). Unlike cancellation, the time
+ * window here is the OPPOSITE: allowed before OR during the session,
+ * rejected only once the booking's current end time has passed. Also
+ * checked here (purely to avoid showing a button that would immediately
+ * bounce off the closing-time check): the new end time must still fit
+ * before 21:00.
+ */
+export function isExtendEligible(booking: ScheduleBooking, scheduleDateISO: string): boolean {
+  if (booking.displayStatus !== "confirmed") return false;
+  if (!booking.source || !MANUAL_BOOKING_SOURCES.has(booking.source)) return false;
+  if (booking.paymentStatus !== "unpaid") return false;
+  if (booking.roomId === PARTY_ROOM_ID) return false;
+  if (booking.endMinute + EXTENSION_MINUTES > CLOSE_MINUTE) return false;
+
+  const todayISO = getColomboTodayISO();
+  const nowMinute = getColomboMinuteOfDay();
+  const hasEnded = scheduleDateISO < todayISO || (scheduleDateISO === todayISO && booking.endMinute <= nowMinute);
+  return !hasEnded;
 }

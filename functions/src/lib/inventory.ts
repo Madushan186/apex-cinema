@@ -2,6 +2,8 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import type { BookablePackageId, SlotTime } from "@apex-cinema/booking-core";
 import {
+  EXTENSION_FEE_LKR,
+  EXTENSION_MINUTES,
   computeEndMinute,
   endsWithinBusinessHours,
   getColomboMinuteOfDay,
@@ -12,7 +14,12 @@ import {
   slotTimeToMinutes,
 } from "@apex-cinema/booking-core";
 import { COLLECTIONS, db, inventoryDocId } from "./firestore";
-import { fingerprintHoldRequest, fingerprintManualBookingRequest, generateReferenceCode } from "./reference";
+import {
+  fingerprintExtensionRequest,
+  fingerprintHoldRequest,
+  fingerprintManualBookingRequest,
+  generateReferenceCode,
+} from "./reference";
 import type { ManualBookingSource } from "./validation";
 
 /**
@@ -669,5 +676,293 @@ export async function cancelManualBookingTransactional(
       roomId: booking.roomId,
       dateISO: booking.dateISO,
     };
+  });
+}
+
+/**
+ * A single, explicitly-approved +1 hour extension of a confirmed, unpaid,
+ * staff/owner-entered manual reservation for a standard room (1–5) —
+ * docs/PROGRESS.md "manual-booking extensions" phase, docs/DECISIONS.md
+ * D16. Reuses this file's exact per-room/per-date inventory-doc +
+ * transaction pattern, same as cancellation above. Deliberately narrow, per
+ * this phase's approved rules:
+ *  - Same eligibility gate as cancellation for "is this even a cancellable/
+ *    extendable manual booking": `bookingStatus === "confirmed"`, `source`
+ *    is "staff_walkin"/"staff_phone" (excludes online + any future Party
+ *    source), `paymentStatus === "unpaid"`, package `isBookableOnline`
+ *    (excludes Party/room-6) — all checked explicitly, never inferred.
+ *  - Time window is the OPPOSITE of cancellation's: allowed before OR
+ *    during the session, rejected only once the booking's *current* end
+ *    time has already passed (server's own Asia/Colombo clock) — a
+ *    finished session can't retroactively grow.
+ *  - Exactly +60 minutes and +LKR 1,000 per call — never a client-supplied
+ *    amount or duration.
+ *  - The new end time must still be `<= CLOSE_MINUTE` (21:00) —
+ *    `endsWithinBusinessHours`, the same helper every other session-length
+ *    check in this file already uses.
+ *  - Same room, same date, same start time, same guest capacity — this
+ *    function never reassigns a room or touches `peopleCount`.
+ *  - The extra hour must be free on THIS room only (no room search/
+ *    reassignment) — rejects on any other *active* interval (confirmed, or
+ *    an unexpired hold) overlapping the new [startMinute, newEndMinute)
+ *    range, same `isActive`/`minutesOverlap` primitives `findFreeRoom`
+ *    already uses.
+ *  - Never changes `paymentStatus`, never collects or records a payment —
+ *    the original package price (`totalAmountMinor`) is preserved exactly
+ *    as written at creation; extension charges accumulate in a *separate*
+ *    field (`extensionChargesMinor`) plus one doc per approval in the
+ *    `bookings/{id}/extensions` subcollection (docs/ARCHITECTURE.md §3,
+ *    now implemented) — the new total is `totalAmountMinor +
+ *    extensionChargesMinor`, always computed, never a third stored
+ *    grand-total field that could drift from the two it's derived from.
+ *
+ * Idempotency + optimistic concurrency, together: unlike cancellation
+ * (whose own "is it already cancelled" state is sufficient idempotency by
+ * itself), an extension both (a) needs a normal idempotency key — because
+ * a bare retry of the identical approval must never add a second hour —
+ * AND (b) needs the caller's `expectedCurrentEndMinute` to match the
+ * booking's actual current end time — because a *fresh* key computed
+ * against *stale* client state (e.g. two staff members' schedules both
+ * showing the pre-extension end time) must be rejected, not silently
+ * treated as a legitimate second extension stacked on top of a first one
+ * the caller never saw. Concretely:
+ *  - Same key + same expected end time (a genuine retry) → idempotent
+ *    no-op, returns the original result unchanged, no second write.
+ *  - Same key + a *different* expected end time → `already-exists` (key
+ *    reuse for a different request, same as every other idempotency key in
+ *    this codebase).
+ *  - A *new* key whose expected end time doesn't match the booking's real
+ *    current end time → `aborted` — a genuinely new request, but made
+ *    against state that's since changed; rejected before any write, so the
+ *    caller must re-read the booking and, if they still want to extend it
+ *    again, submit a new request with the *current* end time and a new
+ *    idempotency key (see docs/PROGRESS.md for the UI-side flow).
+ */
+export interface ExtendManualBookingParams {
+  readonly bookingId: string;
+  readonly expectedCurrentEndMinute: number;
+  readonly idempotencyKey: string;
+}
+
+export interface ExtendManualBookingResult {
+  readonly bookingId: string;
+  readonly roomId: string;
+  readonly dateISO: string;
+  readonly startMinute: number;
+  readonly previousEndMinute: number;
+  readonly newEndMinute: number;
+  readonly extensionFeeMinor: number;
+  /** Always the original package price — never touched by an extension. */
+  readonly totalAmountMinor: number;
+  readonly extensionCount: number;
+  readonly extensionChargesMinor: number;
+  /** totalAmountMinor + extensionChargesMinor, computed. */
+  readonly newTotalAmountMinor: number;
+  readonly currency: "LKR";
+}
+
+interface RawBookingForExtension {
+  readonly packageId: string;
+  readonly roomId: string;
+  readonly dateISO: string;
+  readonly startMinute: number;
+  readonly endMinute: number;
+  readonly bookingStatus: string;
+  readonly paymentStatus?: string;
+  readonly source?: string;
+  readonly totalAmountMinor: number;
+  readonly extensionCount?: number;
+  readonly extensionChargesMinor?: number;
+}
+
+interface ExtensionIdempotencyRecord {
+  readonly fingerprint: string;
+  readonly response: ExtendManualBookingResult;
+}
+
+const EXTENSION_FEE_MINOR = priceLKRToMinorUnits(EXTENSION_FEE_LKR);
+
+export async function extendManualBookingTransactional(
+  params: ExtendManualBookingParams,
+  actorUid: string,
+): Promise<ExtendManualBookingResult> {
+  const bookingRef = db.collection(COLLECTIONS.bookings).doc(params.bookingId);
+  const idempotencyRef = db.collection(COLLECTIONS.extensionIdempotency).doc(params.idempotencyKey);
+  const fingerprint = fingerprintExtensionRequest({
+    actorUid,
+    bookingId: params.bookingId,
+    expectedCurrentEndMinute: params.expectedCurrentEndMinute,
+  });
+
+  return db.runTransaction(async (transaction) => {
+    // Firestore transactions require every read before any write. The
+    // booking doc is read before the inventory doc because the inventory
+    // doc's id depends on the booking's own roomId/dateISO.
+    const idempotencySnap = await transaction.get(idempotencyRef);
+    if (idempotencySnap.exists) {
+      const existing = idempotencySnap.data() as ExtensionIdempotencyRecord;
+      if (existing.fingerprint !== fingerprint) {
+        throw new HttpsError(
+          "already-exists",
+          "This idempotency key was already used for a different extension request.",
+        );
+      }
+      // Exact retry: return the original result unchanged. No second hour, no second charge.
+      return existing.response;
+    }
+
+    const bookingSnap = await transaction.get(bookingRef);
+    if (!bookingSnap.exists) {
+      throw new HttpsError("not-found", "Booking not found.");
+    }
+    const booking = bookingSnap.data() as RawBookingForExtension;
+
+    if (booking.bookingStatus !== "confirmed") {
+      throw new HttpsError("failed-precondition", "Only a confirmed booking can be extended.");
+    }
+    if (booking.source !== "staff_walkin" && booking.source !== "staff_phone") {
+      // Excludes online (source: "online") and any future Party source
+      // (source: "staff_party") — this operation only ever extends a
+      // staff/owner-entered manual reservation, per this phase's scope.
+      throw new HttpsError(
+        "failed-precondition",
+        "Only staff/owner-entered manual bookings can be extended here.",
+      );
+    }
+    if (booking.paymentStatus !== "unpaid") {
+      throw new HttpsError("failed-precondition", "Only unpaid bookings can be extended here.");
+    }
+
+    const facts = getPackageFacts(booking.packageId);
+    if (!facts || !facts.isBookableOnline) {
+      // Defense-in-depth: excludes Party (room 6) even if a booking doc
+      // with packageId "party" somehow reached this state.
+      throw new HttpsError("failed-precondition", "This booking's package cannot be extended here.");
+    }
+
+    // Optimistic-concurrency check: the caller's assumed current end time
+    // must match reality, checked BEFORE the time-window/overlap checks so
+    // a stale request is rejected for the right reason (see the
+    // function-level doc comment above) rather than a confusing
+    // downstream error.
+    if (booking.endMinute !== params.expectedCurrentEndMinute) {
+      throw new HttpsError(
+        "aborted",
+        "This booking has changed since you last viewed it — refresh and try again.",
+      );
+    }
+
+    // Eligibility: allowed before OR during the session, rejected only once
+    // the *current* end time has already passed — the server's own
+    // Asia/Colombo clock, never a client-supplied "now".
+    const todayISO = getColomboTodayISO();
+    const nowMinute = getColomboMinuteOfDay();
+    const hasEnded = booking.dateISO < todayISO || (booking.dateISO === todayISO && booking.endMinute <= nowMinute);
+    if (hasEnded) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This booking has already ended and can no longer be extended.",
+      );
+    }
+
+    const newEndMinute = booking.endMinute + EXTENSION_MINUTES;
+    if (!endsWithinBusinessHours(newEndMinute)) {
+      throw new HttpsError("failed-precondition", "That extension would end after closing time.");
+    }
+
+    const inventoryRef = db.collection(COLLECTIONS.inventory).doc(inventoryDocId(booking.roomId, booking.dateISO));
+    const inventorySnap = await transaction.get(inventoryRef);
+    const inventoryDoc = inventorySnap.data() as InventoryDoc | undefined;
+    const intervals = inventoryDoc?.intervals ?? [];
+    const targetInterval = intervals.find((interval) => interval.bookingId === params.bookingId);
+    if (!targetInterval) {
+      throw new HttpsError("internal", "This booking's inventory record could not be found.");
+    }
+
+    // The extra hour must be free on THIS room — no room search, no
+    // reassignment. Every other *active* interval on this room/date is
+    // checked for overlap against the new, longer range; this booking's
+    // own interval is excluded by bookingId (extending into your own
+    // current slot is not a conflict).
+    const nowMillis = Date.now();
+    const conflict = intervals.some(
+      (interval) =>
+        interval.bookingId !== params.bookingId &&
+        isActive(interval, nowMillis) &&
+        minutesOverlap({ start: booking.startMinute, end: newEndMinute }, { start: interval.startMinute, end: interval.endMinute }),
+    );
+    if (conflict) {
+      // No writes staged yet — throwing here leaves Firestore untouched.
+      throw new HttpsError(
+        "failed-precondition",
+        "The extra hour is not available — it conflicts with another reservation or hold.",
+      );
+    }
+
+    const updatedIntervals = intervals.map((interval) =>
+      interval.bookingId === params.bookingId ? { ...interval, endMinute: newEndMinute } : interval,
+    );
+
+    transaction.set(inventoryRef, {
+      roomId: booking.roomId,
+      dateISO: booking.dateISO,
+      intervals: updatedIntervals,
+    });
+
+    const newExtensionCount = (booking.extensionCount ?? 0) + 1;
+    const newExtensionChargesMinor = (booking.extensionChargesMinor ?? 0) + EXTENSION_FEE_MINOR;
+
+    // Same room/date/start time/capacity — only endMinute and the
+    // extension summary fields change. totalAmountMinor (the original
+    // package price) is never touched.
+    transaction.update(bookingRef, {
+      endMinute: newEndMinute,
+      extensionCount: newExtensionCount,
+      extensionChargesMinor: newExtensionChargesMinor,
+    });
+
+    const extensionRef = bookingRef.collection(COLLECTIONS.bookingExtensions).doc();
+    transaction.set(extensionRef, {
+      approvedByUid: actorUid,
+      previousEndMinute: booking.endMinute,
+      newEndMinute,
+      feeMinor: EXTENSION_FEE_MINOR,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    // Audit trail with a real before/after diff (docs/SECURITY.md §8) —
+    // structural fields only, never customer detail.
+    const auditRef = db.collection(COLLECTIONS.auditLog).doc();
+    transaction.set(auditRef, {
+      actorUid,
+      action: "manual_booking_extended",
+      targetType: "booking",
+      targetId: params.bookingId,
+      roomId: booking.roomId,
+      dateISO: booking.dateISO,
+      before: { endMinute: booking.endMinute },
+      after: { endMinute: newEndMinute },
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    const response: ExtendManualBookingResult = {
+      bookingId: params.bookingId,
+      roomId: booking.roomId,
+      dateISO: booking.dateISO,
+      startMinute: booking.startMinute,
+      previousEndMinute: booking.endMinute,
+      newEndMinute,
+      extensionFeeMinor: EXTENSION_FEE_MINOR,
+      totalAmountMinor: booking.totalAmountMinor,
+      extensionCount: newExtensionCount,
+      extensionChargesMinor: newExtensionChargesMinor,
+      newTotalAmountMinor: booking.totalAmountMinor + newExtensionChargesMinor,
+      currency: "LKR",
+    };
+
+    const idempotencyRecord: ExtensionIdempotencyRecord = { fingerprint, response };
+    transaction.set(idempotencyRef, { ...idempotencyRecord, createdAt: FieldValue.serverTimestamp() });
+
+    return response;
   });
 }

@@ -38,6 +38,12 @@ export interface ScheduleBooking {
   readonly source: string | null;
   /** Staff-authored reason, present only once cancelled. Never customer PII — same treatment as `staffNote`. */
   readonly cancellationReason: string | null;
+  /** Original package price, minor units — never changed by an extension (docs/DECISIONS.md D16). Present only on manual reservations, same as paymentStatus. */
+  readonly totalAmountMinor: number | null;
+  /** Number of approved +1 hour extensions so far — 0 if none. */
+  readonly extensionCount: number;
+  /** Sum of all extension fees, minor units — 0 if none. */
+  readonly extensionChargesMinor: number;
 }
 
 interface RawBooking {
@@ -55,6 +61,9 @@ interface RawBooking {
   paymentStatus?: PaymentStatus;
   source?: string;
   cancellationReason?: string;
+  totalAmountMinor?: number;
+  extensionCount?: number;
+  extensionChargesMinor?: number;
 }
 
 /**
@@ -105,6 +114,9 @@ export async function getBookingsForDate(dateISO: string): Promise<readonly Sche
       paymentStatus: raw.paymentStatus ?? null,
       source: raw.source ?? null,
       cancellationReason: raw.cancellationReason ?? null,
+      totalAmountMinor: raw.totalAmountMinor ?? null,
+      extensionCount: raw.extensionCount ?? 0,
+      extensionChargesMinor: raw.extensionChargesMinor ?? 0,
     };
     return booking;
   });

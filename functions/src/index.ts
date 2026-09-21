@@ -8,6 +8,7 @@ import { onCall } from "firebase-functions/v2/https";
 export { cancelManualBooking } from "./cancelManualBooking";
 export { createHold } from "./createHold";
 export { createManualBooking } from "./createManualBooking";
+export { extendManualBooking } from "./extendManualBooking";
 export { getAvailability } from "./getAvailability";
 export { getOwnerOverview } from "./getOwnerOverview";
 export { getPackages } from "./getPackages";
