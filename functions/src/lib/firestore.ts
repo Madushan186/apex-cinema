@@ -27,6 +27,10 @@ export const COLLECTIONS = {
   holdIdempotency: "holdIdempotency",
   /** Idempotency records for createManualBooking — kept separate from holdIdempotency since it's a different operation/response shape. */
   manualBookingIdempotency: "manualBookingIdempotency",
+  /** Idempotency + expected-state records for extendManualBooking — see lib/inventory.ts's extendManualBookingTransactional. */
+  extensionIdempotency: "extensionIdempotency",
+  /** Subcollection name under bookings/{bookingId} — one doc per approved extension (docs/ARCHITECTURE.md §3, now implemented). */
+  bookingExtensions: "extensions",
   rateLimits: "rateLimits",
   config: "config",
   /** Append-only, Cloud-Functions-only writes (docs/ARCHITECTURE.md §3, docs/SECURITY.md §8). No customer PII — see lib/inventory.ts's manual-booking audit write. */

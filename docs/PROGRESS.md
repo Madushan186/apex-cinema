@@ -975,12 +975,182 @@ Same isolated instance (`firebase.test.json`, project `demo-apex-cinema-test`, p
 - The owner overview's `ScheduleCounts` (`getOwnerOverview`) was not extended with a `cancelled` count — cancelled bookings still count toward `total` but not toward any specific sub-category. Not requested this phase; a small, low-risk follow-up if the owner overview should surface cancellation counts.
 - `cancellationReason` is stored and returned by the API and visible via direct Firestore inspection, but the staff schedule UI doesn't currently render it inline on the row (only the "Cancelled" badge) — the booking's history is fully preserved and retrievable, just not surfaced as extra UI text this phase; a small follow-up if staff want to see the reason at a glance without opening the (now cancelled) booking's original dialog context.
 
-### Phase 7 — proposed next steps (not started, not approved)
+### Phase 7 — Manual-booking one-hour extensions (local emulators only)
 
-- **7a. Resolve remaining open decisions**: exact deposit amount (#3), party notice definition (#1) and duration (#2), the Owner-override-for-started-bookings cutoff (#6, remaining half) — needed before payment/confirmation, that override, or Party manual-entry work.
-- **7b. Staff/owner mutations, part 3**: extension approval, and Party (Room 6) manual entry with staff-set start/end time (D2's open duration question) — through the same inventory transaction pattern, each with its own audit entries.
-- **7c. Payment confirmation**: once the deposit question is answered, a `confirmBooking`-style function transitioning `pending_hold` → `confirmed`, and a way to record an operational (cash/other) payment against a manual booking, transitioning its `paymentStatus` away from `"unpaid"` — still no live PayHere without explicit approval.
-- **7d. Owner MFA**, if/when Identity Platform + Blaze billing is approved.
-- **7e. Lazy-load the emulator adapters** to undo the Phase 3 bundle-size regression, if that becomes a priority before real users see the fixture-mode marketing pages.
+**Status: implemented and verified 2026-09-21, awaiting your local review. Not committed, not pushed, not merged.** Implements the extension half of Phase 5/6's proposed "staff/owner mutations, part 3," scoped down exactly as this phase's approved brief specified: staff-approved +1 hour / LKR 1,000 extensions of confirmed, unpaid manual bookings for standard rooms 1–5 only, before or during the session, up to closing time. Party manual entry (the rest of "part 3") remains future work.
+
+Branch: `feature/manual-booking-extensions`, cut from verified `main` (post-PR-#2 merge commit `6fe8ede`) — Phases 5 and 6's work is untouched, this branch adds only extension.
+
+#### Approved scope and rules (given verbatim, not engineering defaults)
+
+- Staff and Owner only.
+- Confirmed, unpaid manual bookings for standard rooms 1–5 only.
+- Allow extension before or during the session, but not once its current end time has been reached, using server time.
+- Each explicit approval adds exactly 60 minutes and LKR 1,000.
+- Further one-hour extensions require a fresh explicit approval.
+- The extended session must end at or before 21:00 Asia/Colombo.
+- Keep the same room, date, start time and guest capacity.
+- Reject overlaps with confirmed bookings and unexpired holds.
+- No Party, online holds, paid bookings, payment collection or refunds.
+
+The LKR 1,000 fee and the "ends by 21:00" rule are **not new business policy invented this phase** — both have been public, confirmed facts in `docs/PROJECT_BRIEF.md` ("Duration & extensions") and shown as marketing copy (`i18n/translations.ts`'s `extensionNote`/FAQ entries) since an earlier phase. This phase finally *implements* an already-promised rule. See `docs/DECISIONS.md` D16 for the full recorded decision.
+
+#### Backend (`functions/src`)
+
+- **`extendManualBooking`** (new callable) — Staff or Owner only (`requireRole`, checked before touching the request body). Delegates to a new `extendManualBookingTransactional` in `lib/inventory.ts`, reusing the exact per-room/per-date inventory-doc + transaction pattern every prior mutation here uses.
+- **Eligibility, all re-checked server-side inside the transaction**: booking exists; `bookingStatus === "confirmed"`; `source` is `"staff_walkin"`/`"staff_phone"` (excludes online + any future Party source); `paymentStatus === "unpaid"`; package `isBookableOnline` (excludes Party); and — the opposite time window from cancellation — the booking's *current* end time hasn't passed yet (allowed before **or during** the session, rejected only once it's actually ended). The new end time must satisfy `endsWithinBusinessHours` (`<= 21:00`, the same helper every other session-length check in this codebase already uses — not a new number). Exactly `EXTENSION_MINUTES`/`EXTENSION_FEE_LKR` (60/1000, new shared constants in `packages/booking-core`, same treatment as `OPEN_MINUTE`/`CLOSE_MINUTE`/`SESSION_MINUTES`) — never a client-supplied amount or duration.
+- **Same room, no reassignment.** The extra hour is checked for conflicts only on the booking's *own* room (no `findFreeRoom` search across a tier) — every other *active* interval on that room/date (confirmed, or an unexpired hold) is checked for overlap against the new, longer `[startMinute, newEndMinute)` range; an expired hold is correctly ignored (`isActive`, unchanged). `startMinute`, `roomId`, `peopleCount` are never touched.
+- **Price preserved, charges tracked separately, total computed.** `totalAmountMinor` (the original package price) is never written by this function. Each approval increments `extensionCount`/`extensionChargesMinor` on the booking doc and writes one doc to the now-implemented `bookings/{id}/extensions/{extensionId}` subcollection (`approvedByUid`, `previousEndMinute`/`newEndMinute`, `feeMinor`, `createdAt` — docs/ARCHITECTURE.md §3). The response's `newTotalAmountMinor` is `totalAmountMinor + extensionChargesMinor`, always computed on the fly — never a third stored grand-total field that could drift from the two it's derived from.
+- **Idempotency + optimistic concurrency, together — the part of this phase that needed real design, not just a copy of the cancellation pattern.** Cancellation could use "is it already cancelled" as its own idempotency check because it has exactly one reachable end state. Extension doesn't: a second approval is structurally identical to a first one, so state alone can't tell "a safe retry of the approval that just happened" apart from "a new approval, sent against a state the caller never actually saw." The request therefore carries both a normal idempotency key (`extensionIdempotency/{key}`, fingerprinted with the actor + booking id + `expectedCurrentEndMinute`) *and* that `expectedCurrentEndMinute` is separately checked against the booking's real current end time inside the transaction:
+  - Same key, same expected end time (a genuine retry) → idempotent no-op, returns the original result unchanged, no second hour, no second charge.
+  - Same key, a *different* expected end time → `already-exists` (key reuse for a different request).
+  - A *new* key whose expected end time doesn't match the booking's actual current end time → `aborted` — this is the case that actually matters: staff clicking Extend twice before the UI has refreshed generates a fresh key each time (it looks like a deliberate new action), but the stale expected end time is caught and rejected *before any write*, so it can never silently stack a second hour on top of a first extension the caller hadn't seen yet.
+  - An intentional further extension — using the *updated* end time (from the previous response) and a *new* key — succeeds normally, exactly per this phase's brief ("further one-hour extensions require a fresh explicit approval... using the updated booking state and a new operation ID").
+- **`lib/validation.ts`**'s new `validateExtendManualBookingRequest` checks only shape/presence (bookingId, expectedCurrentEndMinute, idempotencyKey) — every actual eligibility and staleness check happens server-side inside the transaction, which needs to read the booking doc anyway.
+- **`lib/schedule.ts`**'s `ScheduleBooking`/`getBookingsForDate` gained `totalAmountMinor`/`extensionCount`/`extensionChargesMinor` (read-only, for the staff UI's extend-dialog preview and "extended +Nh" indicator) — `endMinute` itself already reflected extensions automatically, with zero changes needed, since it's read straight from the same `bookings` doc the extension transaction writes to.
+- **Public availability reflects extensions with zero code changes.** `computeAvailability` (`lib/availability.ts`) was never touched — it already reads the same `inventory/{roomId}_{dateISO}` docs and does the same `isActive`/`minutesOverlap` check against each candidate public slot, so once an interval's `endMinute` grows, every slot that now overlaps it is correctly marked unavailable automatically. Verified directly: extending a 09:00 AC Small booking to 09:00–13:00 makes the 12:00 public slot show `"full"` — the exact canonical example from `docs/PROJECT_BRIEF.md`.
+- **Cancellation releases the full extended interval, unmodified.** `cancelManualBookingTransactional` (Phase 6) needed **no changes at all** for this to work correctly: it already reads the booking's *current* `endMinute` fresh and finds the matching interval by `bookingId` (not by original start/end values), so an extended-then-cancelled booking's interval is released at its actual extended end time — verified directly, not just reasoned through (see below).
+- **`firestore.rules`** — two new explicit deny blocks (`extensionIdempotency/{key}`, `bookings/{bookingId}/extensions/{extensionId}`), matching the established per-collection pattern; both were already covered by the root catch-all, explicit for the same clarity/defense-in-depth reasoning as every other collection here. No new *allow* rule anywhere — every read/write still goes through a Cloud Function.
+
+#### Frontend (`app/src`)
+
+- **`components/staff/ExtendBookingDialog.tsx`** (new) — a confirmation dialog showing the current end time, the new end time, the LKR 1,000 additional charge, and the new total (computed from `totalAmountMinor` + prior `extensionChargesMinor` + this extension's fee), plus an explicit "payment is not recorded" notice. No reason field (not required by this phase's rules, unlike cancellation). Captures `booking.endMinute` as `expectedCurrentEndMinute` when the dialog is confirmed, and generates a fresh `crypto.randomUUID()` idempotency key per confirm click — never reused across separate dialog opens, satisfying "an intentional further extension must use the updated booking state and a new operation ID."
+- **`components/ui/dialog.tsx`** — reused unchanged from Phase 6 (no new dialog primitive needed).
+- **`components/staff/scheduleFormat.ts`**'s new `isExtendEligible(booking, scheduleDateISO)` mirrors `extendManualBookingTransactional`'s eligibility exactly (cosmetic only, docs/SECURITY.md §3) — the OPPOSITE time window from `isCancelEligible` (allowed before/during, not after the *current* end time), plus a closing-time pre-check so the button isn't shown for a booking that would immediately bounce off `endsWithinBusinessHours` anyway.
+- **`routes/staff/StaffSchedule.tsx`** — each eligible row gets an "Extend +1 hour" button alongside the existing Cancel button (both can appear on the same row simultaneously — extending and cancelling are independent, non-conflicting eligibility windows); a booking with `extensionCount > 0` shows an "extended +Nh" indicator next to its time range. On success, the same `refreshKey`-bump pattern Phase 6 established re-fetches the schedule so the new end time, charge summary, and public availability all reflect the real server state. On a **stale-state conflict specifically**, the schedule is refreshed immediately too (`onStaleConflict`) — but the dialog itself stays open, still showing the explanatory error message, rather than closing silently out from under the staff member reading it.
+- **`data/firebase/staffApi.ts`** — `ScheduleBooking` gained `totalAmountMinor`/`extensionCount`/`extensionChargesMinor`; new `ExtendManualBookingInput`/`Result` types, an `ExtendManualBookingError` class with a `stale-state` reason distinct from the existing `idempotency-conflict` (so the dialog can show a specifically-worded "this booking changed, please recheck" message), and an `extendManualBooking()` wrapper.
+- **`i18n/translations.ts`** — a new `staff.extendBooking.*` block (button, dialog title/body, current/new end labels, charge/total labels, unpaid notice, confirm/cancel/extending text, the "extended +{{count}}h" indicator, and one error message per discriminated reason, including the stale-state one), both English and Sinhala. The i18n parity test passes.
+
+#### Verification actually run
+
+**Node 22, process-scoped** (`/opt/homebrew/opt/node@22/bin` prefixed on `PATH` for these commands only — global `node` untouched, no other manual environment setup beyond that for the browser suite, which is fully self-contained):
+
+| # | Suite | Command | Result |
+|---|---|---|---|
+| 1 | Typecheck | `npm run typecheck` | ✅ pass (booking-core, app, functions) |
+| 2 | Lint | `npm run lint` | ✅ pass, 0 errors/warnings |
+| 3 | Unit tests | `npm run test:unit` | ✅ **71/71** (21 booking-core + 50 app — unchanged; all new coverage this phase is integration-level, below) |
+| 4 | Production build (frontend) | `npm run build` | ✅ succeeds |
+| 5 | Production build (functions) | `npm run build:functions` | ✅ succeeds |
+| 6 | **Backend, isolated emulator** | manual isolated-instance run (own project/ports) | ✅ **121/121** (93 before this phase + 28 new in `extendManualBooking.emulator.test.ts`, including the 2 new `firestore.rules.test.ts` assertions) |
+| 7 | **Browser, isolated emulator, `@emulator`** | `npm run test:e2e:emulator` (self-contained, isolated) | ✅ **24/24** (19 before this phase + 5 new in `extendManualBooking.emulator.spec.ts`) |
+
+**Every explicitly required test scenario, and where it's proven:**
+
+| Requirement | Result |
+|---|---|
+| Staff/Owner success and unauthorized rejection | ✅ staff and owner both succeed; unauthenticated → `unauthenticated`; no-role → `permission-denied`; `role: "owner"` payload-tampering has no effect |
+| Server-calculated amounts; reject client price manipulation | ✅ a request with `extensionFeeMinor`/`newTotalAmountMinor` fields set to `1` is ignored entirely — the response always shows the real LKR 1,000 fee and the real computed total |
+| Conflicts with reservations and active holds; expired holds ignored | ✅ a confirmed booking on the same room in the extra hour → rejected; an unexpired online hold on the same room in the extra hour → rejected; the identical hold *backdated* to expired → the extension succeeds |
+| Ending exactly at 21:00 allowed; later rejected | ✅ three sequential extensions from a 15:00 start (18:00→19:00→20:00→21:00) all succeed, ending exactly at closing; a fourth attempt is rejected, and the booking's stored `endMinute` is confirmed unchanged by the rejected attempt |
+| Ended, cancelled, paid, online-hold and Party bookings rejected | ✅ each proven independently: an already-ended booking (synthetic, since the create API refuses a past time); an already-cancelled booking (real cancel-then-extend); a `paymentStatus` patched away from `"unpaid"` (synthetic, since D14 has no real "paid" path yet); a real online hold's booking id; a synthetic `packageId: "party"`/`confirmed` booking (synthetic, since the create API refuses Party) — every case verified `failed-precondition` and, where applicable, that the booking was left completely unchanged. Also proven the *opposite*: an in-progress (started, not yet ended) synthetic booking **is** eligible — extension succeeds during the session, not just before it, distinguishing this from cancellation's window |
+| Retries and simultaneous extensions cannot double-apply | ✅ exact retry (same key, same expected end time) → identical result, endMinute advances by only 60 total, exactly 1 extension doc, exactly 1 audit entry; true concurrent double-click (`Promise.allSettled`, same key) → both calls resolve, still only 1 extension applied; reusing a key with a *different* expected end time → `already-exists`; a **new** key against a **stale** expected end time → `aborted`, endMinute still only +60, not +120 — the exact bug this design exists to prevent, proven not just reasoned through; an intentional further extension (new key, updated expected end time) → succeeds, endMinute now +120, extensionCount 2 |
+| Extension racing with another booking cannot double-book | ✅ `Promise.allSettled` — extending a booking's session into the next public slot's time range, concurrently with a real guest hold request for that same room's public slot: exactly one of the two succeeds, and `getAvailability` afterward shows that slot as `"full"` either way (never both winning, never neither) |
+| A 09:00–13:00 reservation blocks the 12:00–15:00 public slot | ✅ proven at both the backend level (direct `getAvailability` call after extending) and the full browser level (staff extends via the real UI, then a real customer-facing `/book` wizard visit shows the 12:00 slot disabled) — matches `docs/PROJECT_BRIEF.md`'s canonical example exactly |
+| Cancellation releases the entire extended interval | ✅ extend a booking, then cancel it — the released inventory interval shows the **extended** end time (not the original), and a brand-new manual booking can be made for the portion of the day that was only freed by the extension (e.g. the 12:00 slot after a 09:00–13:00 extended-then-cancelled booking) |
+| Browser confirmation flow, mobile and Sinhala | ✅ `extendManualBooking.emulator.spec.ts` — full dialog flow (current/new end time, LKR 1,000 charge, new total, unpaid notice, confirm → schedule updates with the "extended +1h" indicator); Escape closes without extending (keyboard navigation, proven against the native `<dialog>`'s real `cancel` event); 390px mobile; Sinhala (dialog + confirm + extended range, in Sinhala) |
+
+**A real bug found and fixed while writing the browser tests** (the same class of mistake as Phase 6's, caught the same way): the first draft of the "extended slot blocks the public slot" test asserted `page.getByText("09:00–13:00")` right after clicking Confirm, without first waiting for the confirmation dialog to actually close. Because the dialog itself *previews* the would-be new end time ("09:00–13:00") before the request even completes, that assertion could pass while the real request was still in flight — so the subsequent navigation to the public booking wizard sometimes ran before the extension had actually committed, and the 12:00 slot correctly (from the server's honest point of view) still showed available. Fixed by asserting the dialog's heading is gone *before* checking the schedule row's new text, in all three tests that share this pattern (desktop, mobile, Sinhala) — not an app bug, a test-timing bug, caught by the test failing exactly the way a real timing bug would have.
+
+#### Isolated emulator instructions used
+
+Same isolated instance (`firebase.test.json`, project `demo-apex-cinema-test`, ports 9199/8180/5101) and the same reliable `emulators:start`-in-background workflow documented in the Phase 5/6 sections above. The backend suite was run manually (start → poll for "All emulators ready" → seed → `npm run test --workspace functions` → stop); the browser suite used the self-contained `npm run test:e2e:emulator` with zero manual environment setup beyond the Node 22 `PATH` prefix. Confirmed before and after every run: isolated ports freed; the live preview emulator (default ports, `./emulator-data`) healthy and completely unchanged.
+
+#### Files changed
+
+`packages/booking-core/src/businessRules.ts` (+`EXTENSION_FEE_LKR`/`EXTENSION_MINUTES`) + `index.ts` (re-export); `functions/src/extendManualBooking.ts` (new), `functions/src/index.ts` (export), `functions/src/lib/inventory.ts` (new `extendManualBookingTransactional`), `functions/src/lib/reference.ts` (new `fingerprintExtensionRequest`), `functions/src/lib/validation.ts` (new `validateExtendManualBookingRequest`), `functions/src/lib/firestore.ts` (`extensionIdempotency`/`bookingExtensions` collection names), `functions/src/lib/schedule.ts` (`ScheduleBooking`/`RawBooking` +`totalAmountMinor`/`extensionCount`/`extensionChargesMinor`), `functions/tests/extendManualBooking.emulator.test.ts` (new, 28 tests), `functions/tests/firestore.rules.test.ts` (+2 assertions); `firestore.rules` (+2 explicit deny blocks); `app/src/components/staff/ExtendBookingDialog.tsx` (new), `app/src/components/staff/scheduleFormat.ts` (`isExtendEligible`), `app/src/routes/staff/StaffSchedule.tsx` (extend button, dialog wiring, extended-badge, refresh-on-success/stale-conflict), `app/src/data/firebase/staffApi.ts` (`ScheduleBooking` fields, `ExtendManualBooking*` types/error/wrapper), `app/src/i18n/translations.ts` (`staff.extendBooking.*`, both languages); `app/e2e/extendManualBooking.emulator.spec.ts` (new, 5 tests); `docs/DECISIONS.md` (D16), `docs/ARCHITECTURE.md` (§1 status line, §3 data model, §4 state diagram, §6 idempotency — also corrected two places that were still stale from Phase 6's cancellation work and never updated then), `docs/PROGRESS.md` (this section).
+
+#### Known limitations / honest gaps
+
+- No maximum extension count is enforced beyond the natural closing-time limit (`endsWithinBusinessHours`) — per this phase's rules, that's correct (only "ends by 21:00" was specified), not an oversight, but flagging it as a deliberate absence rather than silence.
+- Party (room 6) manual entry — the other half of the originally-proposed "staff/owner mutations, part 3" — remains entirely out of scope, unchanged.
+- The owner overview's `ScheduleCounts` was not extended with any extension-related figures (e.g. total extension revenue for a date) — not requested this phase.
+- `docs/ARCHITECTURE.md`'s booking-status diagram now correctly shows `confirmed`→`cancelled` as implemented, but this was a pre-existing staleness gap from Phase 6 (the diagram was never updated when cancellation shipped) — corrected as part of this phase's docs pass rather than left for a future one, since leaving it would have made the diagram internally contradict this phase's own D16 addition sitting right next to it.
+
+### Dev-server blank-screen fix #2 — Extend dialog (before starting Phase 8)
+
+**Status: done, verified 2026-09-21.** User-reported, on the running Vite **dev** preview (`http://localhost:5173/staff`, not the production build): a confirmed, unpaid AC Small manual booking's "Extend +1 hour" button turned the entire page black/empty — URL stayed `/staff`, no dialog appeared. Local dev only; no `feature/manual-booking-extensions` application code was changed. Reproduced first, against the real dev server, before any change.
+
+#### First console exception captured (before any fix)
+
+```
+TypeError: Cannot read properties of undefined (reading 'toLocaleString')
+    at ExtendBookingDialog (.../ExtendBookingDialog.tsx?t=...:210:71)
+```
+— plus React's "Consider adding an error boundary" warning, which is *why* the whole page went blank rather than just the dialog: this app has no error boundary anywhere in its render tree, so one component's uncaught render exception unmounts the entire tree.
+
+#### Root cause — two layers, neither of them the previous SLOT_TIMES issue
+
+This is explicitly **not** a repeat of the earlier "[Dev-server blank-screen fix](#dev-server-blank-screen-fix-before-starting-phase-5)" (line ~514): that bug was esbuild never pre-bundling `@apex-cinema/booking-core` at all, so the raw CJS module had no named exports visible to the browser's ES-module loader (`optimizeDeps.include` fix, still present and correct in `app/vite.config.ts` — verified unchanged). This bug is different: the package **was** included and pre-bundled, but the dev server's on-disk pre-bundle cache was **stale relative to newly-added exports**:
+
+1. **Stale `optimizeDeps` cache (the actual defect).** Phase 7 added `EXTENSION_FEE_LKR`/`EXTENSION_MINUTES` to `packages/booking-core/src/businessRules.ts` at 09:50 on 2026-09-21. The developer's `vite dev` process (`npm run dev`) had been running continuously since *before* that change — since 20:04 the previous evening — and Vite's dev-server dependency optimizer only re-scans and re-bundles a linked package when the server itself starts (or is told to force a re-scan); it does not detect a dependency's source changing while it stays alive. So `app/node_modules/.vite/deps/@apex-cinema_booking-core.js`, generated at 20:04, simply had no `EXTENSION_FEE_LKR` export. `ExtendBookingDialog.tsx`'s import of `EXTENSION_FEE_LKR` (an **imported constant**, not booking data) resolved to `undefined`, and its `.toLocaleString()` call at line 135 (and the arithmetic using it at lines 69–71) threw. Confirmed directly, not assumed: (a) direct browser-side inspection of the served dependency chunk showed the export missing; (b) `packages/booking-core/src/businessRules.ts` and its *built* `dist/businessRules.js`/`dist/index.js` both correctly contained the export (`grep` + `stat` — source mtime Sep 21 09:50, dist mtime Sep 21 10:57) — proving the bug was never in application source or the package build, only in the dev server's stale cache; (c) deleting `app/node_modules/.vite` while the server stayed running did **not** regenerate it on reload — confirming the live process, not the on-disk artifact, was the thing that needed to change state.
+2. **Stale browser HTTP cache (the reason a first cache fix alone didn't visibly resolve it).** After killing and restarting the dev-server process (regenerating a verified-correct on-disk cache, confirmed via `grep -n "EXTENSION"` showing real `Object.defineProperty` exports), the already-open browser tab still crashed identically on a normal reload — its own HTTP cache had the old, stale dependency-chunk response cached by URL and didn't re-request it. A hard reload (bypassing the HTTP cache) picked up the corrected chunk and the dialog rendered correctly.
+
+**Data compatibility was explicitly checked and ruled out as a contributing cause**, per this task's instruction not to assume and not to paper over real gaps with invented defaults: `functions/src/lib/schedule.ts` already maps `extensionChargesMinor: raw.extensionChargesMinor ?? 0` and `totalAmountMinor: raw.totalAmountMinor ?? null` for older persisted bookings that predate Phase 7, and `ExtendBookingDialog.tsx` already handles `booking.totalAmountMinor` defensively (`?? 0`). `booking.extensionChargesMinor` is typed as a plain `number` specifically because the server already guarantees it's never absent. None of this needed to change — the crash was entirely on `EXTENSION_FEE_LKR`, a module-level imported constant, never on booking data.
+
+#### Fix applied
+
+**Operational only — zero application source files changed.** `ExtendBookingDialog.tsx`, `Dialog.tsx`, `scheduleFormat.ts`, `StaffSchedule.tsx`, `vite.config.ts` are all byte-identical to before this task. The fix was:
+
+1. Stopped the stale dev-server process (`kill` the `npm run dev` PID) and restarted it with the exact documented command, `VITE_DATA_MODE=emulator npm run dev --workspace app`, which forces a fresh `optimizeDeps` scan/bundle against current source.
+2. Hard-reloaded the already-open preview tab to discard its stale HTTP-cached copy of the old dependency chunk.
+
+No booking data was reset, no defaults were invented, and — per explicit instruction — the user's existing live-preview bookings were never confirmed, cancelled, or extended in the course of reproducing or fixing this; the crash occurs on dialog *open*, before any mutation, and the booking visible throughout was left exactly as found (`12:00–15:00 · AC Small · Unpaid`, confirmed unchanged before and after via `emulator-data/` timestamps).
+
+#### Why every existing browser test missed this
+
+Every Playwright spec in this repo before this task (`playwright.config.ts`, both the fixture-mode and `@emulator` suites) runs against `app/dist` served by `vite preview` — a full, static Rollup bundle built fresh from current source on every run, with no persistent cross-run cache to go stale. Production builds structurally cannot exercise `vite dev`'s `optimizeDeps` pre-bundling pipeline at all, so no amount of running the existing suite — before or after this fix — could ever have caught a dev-server-cache-staleness bug. This is a real, previously-total coverage gap, not a flaky or under-tested corner of an existing suite.
+
+#### New regression coverage added
+
+- **`app/playwright.dev.config.ts`** (new) — a second Playwright config whose `webServer` starts a genuinely fresh `vite dev` server (`reuseExistingServer: false`), not `vite preview`. Deliberately bound to an isolated port (`5183`, with `--strict-port`) and `127.0.0.1` explicitly — never port 5173 (the developer's own live preview), so this suite can never collide with, or accidentally act on, real preview data. Points at the isolated Firebase emulator (`demo-apex-cinema-test`, ports 9199/8180/5101), same as the existing `@emulator` suite.
+- **`app/e2e/extendManualBooking.devmode.spec.ts`** (new, tagged `@devmode @emulator`) — signs in as staff, creates a real AC Small manual booking via the UI, clicks "Extend +1 hour", and asserts: the dialog heading actually renders (the real regression — a blank page fails this), the exact preview values (`12:00–15:00` → `12:00–16:00`, `LKR 1,000`, `LKR 4,200`, "Payment not recorded"), and **zero console/page errors at any point** — the assertion that actually distinguishes "fixed" from "still broken" here, not just that some text happens to be on screen. Then confirms the extension (safe: synthetic data, isolated emulator) and re-asserts zero page errors.
+- **`scripts/test-e2e-devmode-isolated.sh`** (new) + root **`package.json`**'s `test:e2e:devmode` script — mirrors the existing isolated-emulator workflow (`emulators:start`-in-background + readiness poll, never `emulators:exec`), ending in `playwright test --config playwright.dev.config.ts --grep @devmode` instead of a production build.
+- **`app/tsconfig.node.json`** — added `playwright.dev.config.ts` to `include` (it was missing this, which is why a comment-syntax bug in the new config wasn't caught by `tsc` the first time — see below; closing a real typecheck-coverage gap, not just working around one bug instance).
+- **Known, stated limitation**: this suite always starts a genuinely fresh dev server, so by construction it can never reproduce the *exact* staleness timing of the real incident (a long-running server with source changing underneath it) — a brand-new server always optimizes against current source. Its value is coverage that didn't exist at all before: proving the real dev-mode transform/module-resolution pipeline renders this dialog without throwing, which would also catch a broader class of dev-mode-only regressions (e.g. `optimizeDeps.include` being accidentally removed, or another dependency losing CJS→ESM interop).
+
+#### Bugs hit while building the new test lane (not the main bug, but worth recording)
+
+- A literal `*/` inside `TEST_*/VITE_FIREBASE_*` in a `/** ... */` JSDoc comment in the first draft of `playwright.dev.config.ts` prematurely closed the comment block, causing a syntax error when Playwright loaded the config. Fixed with a space (`TEST_* / VITE_FIREBASE_*`); also fixed the `tsconfig.node.json` gap above so `tsc` would catch this class of error in the future.
+- First draft used port 5173 for the new suite's dev server — the same port as the developer's live preview. Recognized as a real safety risk before ever running it (could collide with, or worse, let the test's Confirm-click land on a real preview booking) and changed to isolated port 5183 with `--strict-port`.
+- First run of `npm run test:e2e:devmode` timed out waiting for the webServer (`Timed out waiting 30000ms`) even though Vite's own log said "ready" — diagnosed by running the exact webServer command manually and `curl`-ing it directly (connection refused). Root cause: missing `--host 127.0.0.1`, so Vite wasn't bound to an address reachable at that exact address in this environment. Fixed by adding `--host 127.0.0.1`, matching the existing `playwright.config.ts`'s pattern for `vite preview`.
+
+#### Verified
+
+Live preview (manual, direct browser check, real dev server + real Firestore emulator data — no mutation of the user's existing booking at any point):
+
+- Clicking Extend now opens the dialog with zero console errors.
+- The `12:00–15:00` AC Small booking previews `12:00–16:00`, `LKR 1,000` additional charge, `LKR 4,200` new total, and an explicit unpaid notice — exact match to the required values.
+- Escape closes the dialog with no change to the booking (confirmed via before/after schedule text).
+- The user's real booking was left exactly as found throughout (`Unpaid`, unchanged) — confirmed again after all verification work, including that `emulator-data/` timestamps never changed.
+
+Automated, Node 22 process-scoped (`/opt/homebrew/opt/node@22/bin` prefixed to individual commands only):
+
+| # | Suite | Command | Result |
+|---|---|---|---|
+| 1 | Typecheck | `npm run typecheck` | ✅ pass (now also covers `playwright.dev.config.ts`) |
+| 2 | Lint | `npm run lint` | ✅ pass, 0 errors/warnings |
+| 3 | Unit tests | `npm run test:unit` | ✅ 71/71, unchanged |
+| 4 | Production build (frontend) | `npm run build` | ✅ succeeds |
+| 5 | Production build (functions) | `npm run build:functions` | ✅ succeeds |
+| 6 | Backend, isolated emulator | manual isolated-instance run | ✅ 121/121, unchanged |
+| 7 | Browser, isolated emulator, `@emulator` (production build) | `npm run test:e2e:emulator` | ✅ **25/25** (24 previous + the new devmode spec, which is also tagged `@emulator` so it runs here too, and passes under `vite preview` as well) |
+| 8 | **Browser, isolated emulator, `@devmode` (real `vite dev`)** | `npm run test:e2e:devmode` | ✅ **1/1** — the actual regression test for this bug |
+
+English/Sinhala/mobile rendering of the extend dialog: not re-verified manually this pass (a supplementary manual check ran into unrelated browser-automation tooling friction after a viewport resize and was abandoned as redundant) — already conclusively covered by the existing, passing `extendManualBooking.emulator.spec.ts` "390px mobile" and "Sinhala" cases (both in the 25/25 above), which exercise the identical dialog code path this bug was in.
+
+Confirmed throughout and after: isolated emulator ports (9199/8180/5101/5183) fully freed after each run; the user's live preview (port 5173, default emulator ports 9099/8080/5001, `./emulator-data`) healthy and untouched — `emulator-data/` timestamps unchanged from before this task.
+
+#### Files changed
+
+`app/playwright.dev.config.ts` (new), `app/e2e/extendManualBooking.devmode.spec.ts` (new), `scripts/test-e2e-devmode-isolated.sh` (new), `package.json` (root, +`test:e2e:devmode` script), `app/tsconfig.node.json` (+`playwright.dev.config.ts` to `include`), `docs/PROGRESS.md` (this entry). No changes to `ExtendBookingDialog.tsx`, any other `app/src` file, `functions`, `packages/booking-core`, or `app/vite.config.ts` — the defect was a stale local dev-server process state, not a code defect.
+
+### Phase 8 — proposed next steps (not started, not approved)
+
+- **8a. Resolve remaining open decisions**: exact deposit amount (#3), party notice definition (#1) and duration (#2), the Owner-override-for-started-bookings cutoff (#6, remaining half) — needed before payment/confirmation, that override, or Party manual-entry work.
+- **8b. Party (Room 6) manual entry**, with staff-set start/end time (D2's open duration question) — through the same inventory transaction pattern, with its own audit entries.
+- **8c. Payment confirmation**: once the deposit question is answered, a `confirmBooking`-style function transitioning `pending_hold` → `confirmed`, and a way to record an operational (cash/other) payment against a manual booking, transitioning its `paymentStatus` away from `"unpaid"` — still no live PayHere without explicit approval.
+- **8d. Owner MFA**, if/when Identity Platform + Blaze billing is approved.
+- **8e. Lazy-load the emulator adapters** to undo the Phase 3 bundle-size regression, if that becomes a priority before real users see the fixture-mode marketing pages.
 
 Not started until you approve one.

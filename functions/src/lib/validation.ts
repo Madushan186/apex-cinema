@@ -219,6 +219,51 @@ export function validateCancelManualBookingRequest(data: unknown): ValidatedCanc
   };
 }
 
+export interface ValidatedExtendManualBookingRequest {
+  readonly bookingId: string;
+  readonly expectedCurrentEndMinute: number;
+  readonly idempotencyKey: string;
+}
+
+/**
+ * Validates only shape/presence — bookingId a plausible id string,
+ * expectedCurrentEndMinute a plausible in-range minute-of-day, idempotency
+ * key length-bounded. Every actual eligibility rule (booking exists, is a
+ * confirmed/unpaid/manual/standard-room booking, hasn't ended yet, the new
+ * end time fits before closing, no conflicting reservation, and — crucially
+ * — that `expectedCurrentEndMinute` actually matches the booking's current
+ * end time) is checked server-side inside extendManualBookingTransactional,
+ * which needs to read the booking doc anyway.
+ */
+export function validateExtendManualBookingRequest(data: unknown): ValidatedExtendManualBookingRequest {
+  if (!data || typeof data !== "object") invalid("Request body must be an object.");
+  const d = data as Record<string, unknown>;
+
+  if (typeof d.bookingId !== "string" || !BOOKING_ID_PATTERN.test(d.bookingId)) {
+    invalid("A valid bookingId is required.");
+  }
+  // A day has 1440 minutes; bounding generously rather than to exact
+  // business hours here — the real "is this actually valid for this
+  // booking" check happens against the booking's own stored end time
+  // inside the transaction.
+  if (typeof d.expectedCurrentEndMinute !== "number" || !Number.isInteger(d.expectedCurrentEndMinute) || d.expectedCurrentEndMinute < 0 || d.expectedCurrentEndMinute > 1440) {
+    invalid("A valid expectedCurrentEndMinute is required.");
+  }
+  if (
+    typeof d.idempotencyKey !== "string" ||
+    d.idempotencyKey.length < MIN_IDEMPOTENCY_KEY_LENGTH ||
+    d.idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH
+  ) {
+    invalid("A valid idempotency key is required.");
+  }
+
+  return {
+    bookingId: d.bookingId as string,
+    expectedCurrentEndMinute: d.expectedCurrentEndMinute as number,
+    idempotencyKey: d.idempotencyKey as string,
+  };
+}
+
 function validateBookablePackageId(value: unknown): BookablePackageId {
   if (value !== "non-ac" && value !== "ac-small" && value !== "ac-large") {
     invalid("packageId must be a bookable package (party is contact-only).");

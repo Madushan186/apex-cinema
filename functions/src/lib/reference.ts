@@ -53,3 +53,20 @@ export function fingerprintManualBookingRequest(input: {
   ].join("|");
   return createHash("sha256").update(canonical).digest("hex");
 }
+
+/**
+ * Same purpose as fingerprintManualBookingRequest, for extendManualBooking.
+ * Includes `expectedCurrentEndMinute` — a retry of the exact same approval
+ * (same key, same expected end time, same actor) is idempotent and no-ops;
+ * a *different* expected end time under a reused key is a genuinely
+ * different request (rejected as `already-exists`, never silently applied
+ * on top of a stale assumption) — see docs/DECISIONS.md D16.
+ */
+export function fingerprintExtensionRequest(input: {
+  actorUid: string;
+  bookingId: string;
+  expectedCurrentEndMinute: number;
+}): string {
+  const canonical = [input.actorUid, input.bookingId, input.expectedCurrentEndMinute].join("|");
+  return createHash("sha256").update(canonical).digest("hex");
+}

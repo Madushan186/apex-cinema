@@ -66,6 +66,19 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /extensionIdempotency/{key} {
+      allow read, write: if false;
+    }
+
+    // Approved-extension records (docs/ARCHITECTURE.md §3) — same PII/
+    // financial sensitivity as the parent booking; never client-readable
+    // or writable. The root catch-all below would already deny this too
+    // (Firestore's {document=**} matches subcollections at any depth) —
+    // explicit for clarity, same reasoning as every other collection here.
+    match /bookings/{bookingId}/extensions/{extensionId} {
+      allow read, write: if false;
+    }
+
     match /rateLimits/{key} {
       allow read, write: if false;
     }

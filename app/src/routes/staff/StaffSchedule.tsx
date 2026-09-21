@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { CancelBookingDialog } from "@/components/staff/CancelBookingDialog";
 import { DateNav } from "@/components/staff/DateNav";
+import { ExtendBookingDialog } from "@/components/staff/ExtendBookingDialog";
 import { RequireRole } from "@/components/staff/RequireRole";
 import {
   PARTY_ROOM_ID,
@@ -11,6 +12,7 @@ import {
   formatTimeOfDay,
   groupByRoom,
   isCancelEligible,
+  isExtendEligible,
   roomNumber,
 } from "@/components/staff/scheduleFormat";
 import { StaffTopBar } from "@/components/staff/StaffTopBar";
@@ -37,13 +39,16 @@ function BookingRow({
   booking,
   dateISO,
   onRequestCancel,
+  onRequestExtend,
 }: {
   booking: ScheduleBooking;
   dateISO: string;
   onRequestCancel: (booking: ScheduleBooking) => void;
+  onRequestExtend: (booking: ScheduleBooking) => void;
 }) {
   const { t } = useI18n();
-  const eligible = isCancelEligible(booking, dateISO);
+  const cancelEligible = isCancelEligible(booking, dateISO);
+  const extendEligible = isExtendEligible(booking, dateISO);
 
   return (
     <div className="flex flex-col gap-2 rounded-md border border-border-subtle p-3 sm:flex-row sm:items-center sm:justify-between">
@@ -51,6 +56,9 @@ function BookingRow({
         <p className="text-sm font-medium text-foreground">
           {formatTimeOfDay(booking.startMinute)}–{formatTimeOfDay(booking.endMinute)} ·{" "}
           {t(`packages.tiers.${booking.packageId}.name`)}
+          {booking.extensionCount > 0 ? (
+            <span className="text-muted-foreground font-normal"> · {t("staff.extendBooking.extendedBadge", { count: booking.extensionCount })}</span>
+          ) : null}
         </p>
         <p className="text-muted-foreground mt-0.5 text-xs">
           {booking.customerName} · {booking.customerPhone} · {t("staff.peopleLabel", { count: booking.peopleCount })}
@@ -62,7 +70,12 @@ function BookingRow({
       <div className="flex flex-wrap items-center gap-2">
         {booking.paymentStatus === "unpaid" ? <Badge variant="warning">{t("staff.unpaidBadge")}</Badge> : null}
         <Badge variant={STATUS_BADGE_VARIANT[booking.displayStatus]}>{t(STATUS_KEY[booking.displayStatus])}</Badge>
-        {eligible ? (
+        {extendEligible ? (
+          <Button type="button" variant="outline" size="sm" onClick={() => onRequestExtend(booking)}>
+            {t("staff.extendBooking.button")}
+          </Button>
+        ) : null}
+        {cancelEligible ? (
           <Button type="button" variant="outline" size="sm" onClick={() => onRequestCancel(booking)}>
             {t("staff.cancelBooking.button")}
           </Button>
@@ -81,6 +94,7 @@ function ScheduleBody() {
   });
   const [refreshKey, setRefreshKey] = useState(0);
   const [cancelTarget, setCancelTarget] = useState<ScheduleBooking | null>(null);
+  const [extendTarget, setExtendTarget] = useState<ScheduleBooking | null>(null);
   const { data: bookings, error } = usePromise(() => getStaffSchedule(dateISO), [dateISO, refreshKey]);
 
   const grouped = bookings ? groupByRoom(bookings) : null;
@@ -121,7 +135,13 @@ function ScheduleBody() {
                     <p className="text-muted-foreground text-sm">{t("staff.noBookings")}</p>
                   ) : (
                     roomBookings.map((booking) => (
-                      <BookingRow key={booking.bookingId} booking={booking} dateISO={dateISO} onRequestCancel={setCancelTarget} />
+                      <BookingRow
+                        key={booking.bookingId}
+                        booking={booking}
+                        dateISO={dateISO}
+                        onRequestCancel={setCancelTarget}
+                        onRequestExtend={setExtendTarget}
+                      />
                     ))
                   )}
                 </CardContent>
@@ -141,6 +161,27 @@ function ScheduleBody() {
             // Re-fetch the schedule so the cancelled booking's badge and the
             // now-eligible-for-rebooking slot both reflect the real,
             // just-written server state — not an optimistic local guess.
+            setRefreshKey((key) => key + 1);
+          }}
+        />
+      ) : null}
+
+      {extendTarget ? (
+        <ExtendBookingDialog
+          booking={extendTarget}
+          scheduleDateISO={dateISO}
+          onClose={() => setExtendTarget(null)}
+          onExtended={() => {
+            setExtendTarget(null);
+            // Re-fetch so the new end time, extension badge, and public
+            // availability all reflect the real, just-written server state.
+            setRefreshKey((key) => key + 1);
+          }}
+          onStaleConflict={() => {
+            // The booking changed since this dialog opened — refresh the
+            // data behind it now (docs/PROGRESS.md "refresh booking data
+            // after... a stale-state conflict"), but leave the dialog open
+            // so the error message explaining why stays visible.
             setRefreshKey((key) => key + 1);
           }}
         />

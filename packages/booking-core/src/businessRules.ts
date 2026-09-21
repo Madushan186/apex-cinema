@@ -14,6 +14,17 @@ export const SESSION_MINUTES = 180; // full 3-hour sessions, no cleaning buffer
 /** Default only — see docs/DECISIONS.md D7 ("configurable, default 10 minutes"). */
 export const DEFAULT_HOLD_DURATION_MINUTES = 10;
 
+/**
+ * Confirmed fact from docs/PROJECT_BRIEF.md ("+1 hour extension for LKR
+ * 1,000") and docs/DECISIONS.md D16 — a fixed fee per approved one-hour
+ * extension, not client-supplied. Shared here (not read from `config/
+ * booking`) so the marketing copy, the staff extension dialog, and the
+ * server-side charge computation can never drift apart — same reasoning as
+ * OPEN_MINUTE/CLOSE_MINUTE/SESSION_MINUTES above.
+ */
+export const EXTENSION_FEE_LKR = 1000;
+export const EXTENSION_MINUTES = 60;
+
 const PUBLIC_START_MINUTES: readonly number[] = SLOT_TIMES.map(slotTimeToMinutes);
 
 export function isPublicStartTime(time: string): time is SlotTime {

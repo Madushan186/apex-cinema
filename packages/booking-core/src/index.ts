@@ -18,6 +18,8 @@ export { intervalsOverlap } from "./intervals";
 export {
   CLOSE_MINUTE,
   DEFAULT_HOLD_DURATION_MINUTES,
+  EXTENSION_FEE_LKR,
+  EXTENSION_MINUTES,
   OPEN_MINUTE,
   SESSION_MINUTES,
   computeEndMinute,

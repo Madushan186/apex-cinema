@@ -107,6 +107,24 @@ describe("firestore.rules", () => {
     await assertFails(ownerDb.collection("auditLog").doc("some-entry").get());
   });
 
+  it("denies any client read or write of the extension idempotency records, even a staff/owner-claimed token", async () => {
+    const staffDb = testEnv.authenticatedContext("staff-uid", { role: "staff" }).firestore();
+    await assertFails(staffDb.collection("extensionIdempotency").doc("some-key").get());
+    await assertFails(staffDb.collection("extensionIdempotency").doc("some-key").set({ fingerprint: "x" }));
+    const ownerDb = testEnv.authenticatedContext("owner-uid", { role: "owner" }).firestore();
+    await assertFails(ownerDb.collection("extensionIdempotency").doc("some-key").get());
+  });
+
+  it("denies any client read or write of approved-extension records under a booking, even a staff/owner-claimed token", async () => {
+    const staffDb = testEnv.authenticatedContext("staff-uid", { role: "staff" }).firestore();
+    await assertFails(staffDb.collection("bookings").doc("some-booking").collection("extensions").doc("ext-1").get());
+    await assertFails(
+      staffDb.collection("bookings").doc("some-booking").collection("extensions").doc("ext-1").set({ feeMinor: 100000 }),
+    );
+    const ownerDb = testEnv.authenticatedContext("owner-uid", { role: "owner" }).firestore();
+    await assertFails(ownerDb.collection("bookings").doc("some-booking").collection("extensions").doc("ext-1").get());
+  });
+
   it("denies any client read or write of the rate-limit counters", async () => {
     const db = testEnv.unauthenticatedContext().firestore();
     await assertFails(db.collection("rateLimits").doc("hold_abc").get());
