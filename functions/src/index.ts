@@ -5,6 +5,7 @@ import { onCall } from "firebase-functions/v2/https";
 // deployment decision. Function region (e.g. closer to Sri Lanka) is a
 // later, explicit decision — see docs/DECISIONS.md.
 
+export { cancelManualBooking } from "./cancelManualBooking";
 export { createHold } from "./createHold";
 export { createManualBooking } from "./createManualBooking";
 export { getAvailability } from "./getAvailability";

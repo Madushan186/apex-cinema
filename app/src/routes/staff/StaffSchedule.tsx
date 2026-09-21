@@ -1,6 +1,7 @@
 import { isValidDateISO } from "@apex-cinema/booking-core";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
+import { CancelBookingDialog } from "@/components/staff/CancelBookingDialog";
 import { DateNav } from "@/components/staff/DateNav";
 import { RequireRole } from "@/components/staff/RequireRole";
 import {
@@ -9,6 +10,7 @@ import {
   STATUS_BADGE_VARIANT,
   formatTimeOfDay,
   groupByRoom,
+  isCancelEligible,
   roomNumber,
 } from "@/components/staff/scheduleFormat";
 import { StaffTopBar } from "@/components/staff/StaffTopBar";
@@ -23,14 +25,25 @@ import { usePromise } from "@/hooks/usePromise";
 import { useI18n } from "@/i18n/LocaleProvider";
 import { getColomboTodayISO } from "@/lib/colomboTime";
 
-function BookingRow({ booking }: { booking: ScheduleBooking }) {
+const STATUS_KEY = {
+  "active-hold": "staff.statusActiveHold",
+  "expired-hold": "staff.statusExpiredHold",
+  confirmed: "staff.statusConfirmed",
+  cancelled: "staff.statusCancelled",
+  other: "staff.statusOther",
+} as const;
+
+function BookingRow({
+  booking,
+  dateISO,
+  onRequestCancel,
+}: {
+  booking: ScheduleBooking;
+  dateISO: string;
+  onRequestCancel: (booking: ScheduleBooking) => void;
+}) {
   const { t } = useI18n();
-  const statusKey = {
-    "active-hold": "staff.statusActiveHold",
-    "expired-hold": "staff.statusExpiredHold",
-    confirmed: "staff.statusConfirmed",
-    other: "staff.statusOther",
-  } as const;
+  const eligible = isCancelEligible(booking, dateISO);
 
   return (
     <div className="flex flex-col gap-2 rounded-md border border-border-subtle p-3 sm:flex-row sm:items-center sm:justify-between">
@@ -46,9 +59,14 @@ function BookingRow({ booking }: { booking: ScheduleBooking }) {
           {t("staff.referenceLabel")}: {booking.referenceCode}
         </p>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {booking.paymentStatus === "unpaid" ? <Badge variant="warning">{t("staff.unpaidBadge")}</Badge> : null}
-        <Badge variant={STATUS_BADGE_VARIANT[booking.displayStatus]}>{t(statusKey[booking.displayStatus])}</Badge>
+        <Badge variant={STATUS_BADGE_VARIANT[booking.displayStatus]}>{t(STATUS_KEY[booking.displayStatus])}</Badge>
+        {eligible ? (
+          <Button type="button" variant="outline" size="sm" onClick={() => onRequestCancel(booking)}>
+            {t("staff.cancelBooking.button")}
+          </Button>
+        ) : null}
       </div>
     </div>
   );
@@ -61,7 +79,9 @@ function ScheduleBody() {
     const fromQuery = searchParams.get("date");
     return fromQuery && isValidDateISO(fromQuery) ? fromQuery : getColomboTodayISO();
   });
-  const { data: bookings, error } = usePromise(() => getStaffSchedule(dateISO), [dateISO]);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [cancelTarget, setCancelTarget] = useState<ScheduleBooking | null>(null);
+  const { data: bookings, error } = usePromise(() => getStaffSchedule(dateISO), [dateISO, refreshKey]);
 
   const grouped = bookings ? groupByRoom(bookings) : null;
 
@@ -100,7 +120,9 @@ function ScheduleBody() {
                   ) : roomBookings.length === 0 ? (
                     <p className="text-muted-foreground text-sm">{t("staff.noBookings")}</p>
                   ) : (
-                    roomBookings.map((booking) => <BookingRow key={booking.bookingId} booking={booking} />)
+                    roomBookings.map((booking) => (
+                      <BookingRow key={booking.bookingId} booking={booking} dateISO={dateISO} onRequestCancel={setCancelTarget} />
+                    ))
                   )}
                 </CardContent>
               </Card>
@@ -108,6 +130,21 @@ function ScheduleBody() {
           })
         )}
       </div>
+
+      {cancelTarget ? (
+        <CancelBookingDialog
+          booking={cancelTarget}
+          scheduleDateISO={dateISO}
+          onClose={() => setCancelTarget(null)}
+          onCancelled={() => {
+            setCancelTarget(null);
+            // Re-fetch the schedule so the cancelled booking's badge and the
+            // now-eligible-for-rebooking slot both reflect the real,
+            // just-written server state — not an optimistic local guess.
+            setRefreshKey((key) => key + 1);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

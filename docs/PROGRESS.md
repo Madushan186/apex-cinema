@@ -881,12 +881,106 @@ No other env var was set by hand before this command — everything the script n
 - The `emulators:exec`-unreliable-for-isolated-instances root cause is still not diagnosed, only reliably worked around (unchanged from before).
 - This PROGRESS.md update itself landed in a small follow-up commit after the main checkpoint commit (`7ca1130`), rather than being folded into it — noted here rather than silently amending an already-pushed commit.
 
-### Phase 6 — proposed next steps (not started, not approved)
+### Phase 6 — Manual-booking cancellation (local emulators only)
 
-- **6a. Resolve remaining open decisions**: exact deposit amount (#3), party notice definition (#1) and duration (#2), staff-cancellation cutoff (#6) — needed before payment/confirmation, cancellation, or Party manual-entry work.
-- **6b. Staff/owner mutations, part 2**: cancellation (with the D10 restriction), extension approval, and Party (Room 6) manual entry with staff-set start/end time (D2's open duration question) — all through the same inventory transaction pattern, each with its own audit entries.
-- **6c. Payment confirmation**: once the deposit question is answered, a `confirmBooking`-style function transitioning `pending_hold` → `confirmed`, and a way to record an operational (cash/other) payment against a manual booking, transitioning its `paymentStatus` away from `"unpaid"` — still no live PayHere without explicit approval.
-- **6d. Owner MFA**, if/when Identity Platform + Blaze billing is approved.
-- **6e. Lazy-load the emulator adapters** to undo the Phase 3 bundle-size regression, if that becomes a priority before real users see the fixture-mode marketing pages.
+**Status: done — implemented, automated-verified, and owner-verified locally, 2026-09-21.** Implements the cancellation half of Phase 5's proposed item 6b, scoped down exactly as this phase's approved brief specified: unpaid manual bookings for standard rooms 1–5 only, staff/owner (no owner override for started bookings), no payment/refund change. Extension approval and Party manual entry (the rest of 6b) remain future work.
+
+Branch: `feature/manual-booking-cancellation`, cut from verified `main` (post-PR-#1 merge commit `e4784dd`) — the previous phase's work is untouched, this branch adds only cancellation.
+
+#### Approved rules (given verbatim, not engineering defaults)
+
+- Staff and Owner may cancel confirmed, unpaid manual bookings for standard rooms 1–5 only.
+- Cancellation is allowed only before the session starts, checked using server time and the Asia/Colombo booking date/time.
+- A non-empty, length-limited cancellation reason is required.
+- No Owner override for started bookings in this phase.
+- Online holds, paid bookings, and Party bookings are out of scope.
+- Cancellation does not change payment status or issue refunds.
+
+See `docs/DECISIONS.md` D15 for the full recorded decision (supersedes/narrows D10's original proposal — no owner-override capability is built yet, tracked as still-open in item #6).
+
+#### Backend (`functions/src`)
+
+- **`cancelManualBooking`** (new callable) — Staff or Owner only (`requireRole`, checked before touching the request body, same order as every other privileged function here). Delegates to a new `cancelManualBookingTransactional` in `lib/inventory.ts`, which reuses this file's exact per-room/per-date inventory-doc + transaction pattern (docs/ARCHITECTURE.md §6: "every future inventory-changing operation... must go through this same doc + transaction pattern") — cancellation reads the booking doc and its inventory doc inside one `runTransaction`, all reads before any write, exactly like `createHoldTransactional`/`createManualBookingTransactional`.
+- **Eligibility, all re-checked server-side inside the transaction** (never trusted from the client, never only checked once before the transaction opens): booking exists (`not-found` otherwise); `bookingStatus === "confirmed"`; `source` is `"staff_walkin"` or `"staff_phone"` (excludes online holds/bookings and any future `"staff_party"` — checked directly rather than inferred from `bookingStatus` alone, so this stays correct even once a future phase teaches online bookings to reach `"confirmed"` too); `paymentStatus === "unpaid"` (checked explicitly, not just assumed true, so this doesn't silently widen once a future phase adds payment recording); the package's `isBookableOnline` is true (excludes Party/room-6, same check `createManualBookingTransactional` already uses); and the session's start time hasn't passed yet, computed from the server's own Asia/Colombo clock (`getColomboTodayISO()`/`getColomboMinuteOfDay()`) — the identical rule `createHoldTransactional`/`createManualBookingTransactional` already use for rejecting past-dated requests, just inverted. Any failed check throws `failed-precondition` (or `not-found`) *before* any write is staged.
+- **Idempotency without a new collection.** Unlike booking creation (which creates a new random-id resource and needs an idempotency-key → cached-response table to detect a retry), cancellation is a state transition on an *existing* document — "has this already happened" is exactly "is `bookingStatus` already `\"cancelled\"`," checked as the very first thing inside the transaction, after the booking read. An already-cancelled booking returns the original cancellation's result unchanged (no new write, no new audit entry, no repeated inventory release) regardless of what `reason` a later call sends — the first cancellation's reason always wins. This also makes Firestore's own transaction-retry-on-conflict do the concurrency-safety work for free: two truly simultaneous cancel calls both read the booking as `"confirmed"`, one commits first, the other's transaction is retried by Firestore (its read became stale), re-reads the now-`"cancelled"` booking fresh, and takes the no-op branch — proven by a real `Promise.allSettled` concurrent-call test, not just reasoned through (see below).
+- **Only this booking's own interval is released.** The inventory doc's `intervals` array is updated via `.map()`, replacing only the entry whose `bookingId` matches — every other interval on that room/date (including a different booking's session later the same day) is left byte-for-byte untouched. A missing interval (an internal data-consistency anomaly, not a normal rejection) throws `internal` rather than silently no-op'ing.
+- **Booking history is preserved, never deleted.** The transaction uses `transaction.update()` (not `.set()`) on the booking doc, adding `bookingStatus: "cancelled"`, `cancelledAtMillis`, `cancelledBy`, and `cancellationReason` — every original field (customer name/phone/email, price, source, `createdBy`, etc.) is untouched. `paymentStatus` is deliberately never written by this function at all.
+- **Audit trail with a real before/after diff** — the first audit entry in this codebase that's an *edit*, not a creation (every prior entry, `manual_booking_created`, had no meaningful diff to record). `docs/SECURITY.md` §8 already specified audit entries should carry a before/after diff "with any secrets/PII redacted"; this is the first operation where that requirement actually applies. The diff is structural only (`{bookingStatus: "confirmed"} → {bookingStatus: "cancelled"}`) — the reason text and every customer detail are deliberately excluded, following the exact precedent `staffNote` already set (staff-authored free text lives on the booking doc, never duplicated into `auditLog`).
+- **`lib/validation.ts`**'s new `validateCancelManualBookingRequest` checks only shape/presence (a plausible `bookingId` string, a non-empty reason ≤500 chars) — every actual eligibility rule is checked server-side inside the transaction anyway (it has to read the booking doc regardless), so duplicating those checks in the validator would just be a second place for them to drift.
+- **`lib/schedule.ts`**'s `ScheduleBooking`/`getBookingsForDate` gained two read-only fields: `source` (so the staff UI can cosmetically decide which rows to offer a cancel action on) and `cancellationReason` (shown, once cancelled, as part of that booking's preserved history); `DisplayStatus` gained `"cancelled"`, derived the same way every other status already is (from the stored `bookingStatus`, never rewriting the doc just to display it correctly).
+- **`firestore.rules`** — unchanged. No new collection was introduced (cancellation only touches `bookings`/`inventory`/`auditLog`, all three already fully client-denied), so no new rules were needed.
+
+#### Frontend (`app/src`)
+
+- **`components/staff/CancelBookingDialog.tsx`** (new) — a confirmation dialog (booking summary: package, room, date, time, customer; a required, length-bounded reason field; Keep-booking/Confirm-cancellation actions) shown from an eligible schedule row. Client-side reason validation mirrors the server's ("required" only — the server is still the actual boundary); a rejection from the server (already-started, already-cancelled by someone else in the meantime, network error) is shown as a normal inline error state, dialog stays open, nothing is lost.
+- **`components/ui/dialog.tsx`** (new) — a thin wrapper around the native `<dialog>` element (`showModal()`/`close()`), not a new dependency (no `@radix-ui/react-dialog` in this repo) and not a custom focus-trap implementation — `showModal()` gives real browser-native focus trapping, Escape-to-close, and focus restoration on close for free, in every evergreen browser. Supports an `initialFocusRef` so the reason field is focused as soon as the dialog opens, focused in the *same effect* that calls `showModal()` (calling it from a child component's own effect would run too early — React fires child effects before parent effects, so `showModal()` might not have happened yet; documented in the component itself as the reason this isn't just done the "obvious" way).
+- **`components/ui/textarea.tsx`** (new) — same visual/interaction style as the existing `Input`, for the multi-line reason field.
+- **`components/staff/scheduleFormat.ts`**'s new `isCancelEligible(booking, scheduleDateISO)` mirrors `cancelManualBookingTransactional`'s eligibility rule exactly, for deciding which rows show the Cancel action — explicitly documented as cosmetic only, never the actual control (docs/SECURITY.md §3: "UI hiding of buttons is cosmetic only and never the actual control") — the server re-checks everything regardless. `STATUS_BADGE_VARIANT` gained a `cancelled: "negative"` entry (the existing `Badge` component's red/negative status color, already used elsewhere for "full"/negative states).
+- **`routes/staff/StaffSchedule.tsx`** — each eligible row gets a "Cancel booking" button; clicking it opens `CancelBookingDialog`. On success, the schedule re-fetches (a `refreshKey` state bumped and included in the existing `usePromise` deps array — the same pattern the earlier packages-fetch-retry fix already established) rather than optimistically guessing the new state locally — the row then shows the real server-confirmed "Cancelled" badge. Cancelled bookings are never removed from the schedule (the query was never filtered by status) — they stay visible with the badge, satisfying "keep cancelled history visible."
+- **`data/firebase/staffApi.ts`** — `ScheduleBooking` gained `source`/`cancellationReason`; new `CancelManualBookingInput`/`Result` types, a `CancelManualBookingError` class with the same discriminated-reason pattern `ManualBookingError` already established (`not-found` / `ineligible` / `invalid-request` / `unknown`), and a `cancelManualBooking()` wrapper calling the new callable.
+- **`i18n/translations.ts`** — `staff.statusCancelled` and a new `staff.cancelBooking.*` block (button, dialog title/body, reason label/placeholder/required, keep/confirm buttons, cancelling/success text, and one error message per discriminated reason), both English and Sinhala. The i18n parity test (both dictionaries typed against the same shape, checked at compile time and at runtime) passes.
+
+#### Verification actually run
+
+**Node 22, process-scoped** (`/opt/homebrew/opt/node@22/bin` prefixed on `PATH` for these commands only — global `node` untouched, no other manual environment setup beyond that PATH prefix):
+
+| # | Suite | Command | Result |
+|---|---|---|---|
+| 1 | Typecheck | `npm run typecheck` | ✅ pass (booking-core, app, functions) |
+| 2 | Lint | `npm run lint` | ✅ pass, 0 errors/warnings |
+| 3 | Unit tests | `npm run test:unit` | ✅ **71/71** (21 booking-core + 50 app — unchanged from before this phase; all new coverage this phase is integration-level, below) |
+| 4 | Production build (frontend) | `npm run build` | ✅ succeeds |
+| 5 | Production build (functions) | `npm run build:functions` | ✅ succeeds |
+| 6 | **Backend, isolated emulator** | manual isolated-instance run (own project/ports, see docs below) | ✅ **93/93** (75 before this phase + 18 new in `cancelManualBooking.emulator.test.ts`) |
+| 7 | **Browser, isolated emulator, `@emulator`** | `npm run test:e2e:emulator` (self-contained, isolated) | ✅ **19/19** (14 before this phase + 5 new in `cancelManualBooking.emulator.spec.ts`) |
+
+**Every explicitly required test scenario, and where it's proven:**
+
+| Requirement | Result |
+|---|---|
+| Staff success | ✅ `cancelManualBooking.emulator.test.ts` — staff cancels a confirmed manual booking; `bookingStatus` becomes `"cancelled"`, `paymentStatus` stays `"unpaid"`, original fields preserved |
+| Owner success | ✅ same file — owner cancels a confirmed manual booking |
+| Unauthorized rejection | ✅ unauthenticated guest → `unauthenticated`; signed-in no-role account → `permission-denied`; `role: "owner"` tampering in the payload has no effect |
+| Reject a started booking | ✅ a synthetic already-started booking (direct Firestore write, bypassing `createManualBooking`, which itself refuses to create one) is rejected with `failed-precondition` for **both** staff and owner — no owner override, proven not just asserted |
+| Reject a paid booking | ✅ a confirmed manual booking with `paymentStatus` patched directly to `"succeeded"` (no real way to reach that state through the API yet — D14) is rejected |
+| Reject an online booking | ✅ a real `createHold` guest hold's booking id, passed to `cancelManualBooking` → `failed-precondition`, booking untouched (`bookingStatus` still `"pending_hold"`) |
+| Reject a Party booking | ✅ a synthetic `packageId: "party"`/`bookingStatus: "confirmed"` booking (direct Firestore write — the create API already refuses Party) is rejected by the defense-in-depth `isBookableOnline` check |
+| Reject empty reasons | ✅ empty string, whitespace-only, and overlong (501 chars) reasons all rejected with `invalid-argument`, booking left `"confirmed"` |
+| Repeated cancellation is safe | ✅ two sequential calls with *different* reason text: second call returns the *first* call's exact result, only 1 audit entry exists, the interval array has exactly 1 entry for that booking id (not duplicated/re-released) — **and** a true concurrent double-click (`Promise.allSettled`, two simultaneous calls) still produces exactly 1 audit entry, both calls resolve successfully (not "first wins, second errors") |
+| Released inventory can be re-booked without double-booking | ✅ cancel booking A → create booking B for the identical room/date/time → succeeds, different booking id, same room; a third concurrent-style attempt for that now-reoccupied slot is rejected — proven at both the backend level (interval array shows A `"cancelled"`/B `"confirmed"`) and the full browser level (two real UI-driven bookings back to back) |
+| No effect on another booking | ✅ two manual bookings on the same room/date, different times — cancelling one leaves the other's booking doc and inventory interval completely unchanged (still `"confirmed"`, still no expiry) |
+| Browser cancellation flow | ✅ `cancelManualBooking.emulator.spec.ts` — full dialog flow: booking details shown, empty-reason rejected inline (dialog stays open), successful cancel closes the dialog, refreshes the schedule, shows the "Cancelled" badge, "Unpaid" badge still present (payment untouched), Cancel action no longer offered |
+| Keyboard navigation | ✅ Escape closes the dialog without cancelling anything (booking stays `"confirmed"`, Cancel action still offered) — proven against the native `<dialog>`'s real `cancel` event, not simulated |
+| Mobile (390px) | ✅ full cancel flow at 390px viewport |
+| Sinhala | ✅ full cancel flow (dialog title, booking summary, reason field, confirm button, "Cancelled" badge) in Sinhala |
+
+**A real bug found and fixed while writing the browser tests**: the first draft of the "staff cancels..." test asserted on booking-detail text (e.g. "Cancel Flow Customer · 0771230001") without scoping to the dialog — Playwright correctly failed with a strict-mode violation because the *same* text is genuinely visible twice at once (once in the schedule row behind the dialog, once inside the dialog's own summary — the schedule page is still fully rendered underneath a native `<dialog>`, which is exactly right, not a bug in the app). Fixed by scoping the assertion to `page.getByRole("dialog")`.
+
+#### Owner manual verification (2026-09-21, your live preview)
+
+Confirmed directly by you against your own running preview (not the isolated test emulator): cancelling a booking leaves it visible on the schedule as **Cancelled** (not removed — history preserved, matching the automated result above), and the released **AC Small** slot can be booked again (matching the "released inventory can be re-booked without double-booking" result above). No new code changes were made after this — the automated results above (93/93 backend, 19/19 browser, 71/71 unit, typecheck/lint/build clean) stand unchanged and were not re-run for this checkpoint, since nothing they cover changed.
+
+#### Isolated emulator instructions used
+
+Same isolated instance (`firebase.test.json`, project `demo-apex-cinema-test`, ports 9199/8180/5101) and the same reliable `emulators:start`-in-background workflow documented in the Phase 5 section above. The backend suite was run manually (start → poll for "All emulators ready" → seed → `npm run test --workspace functions` → stop); the browser suite used the now-self-contained `npm run test:e2e:emulator` (see the test-isolation checkpoint above) with zero manual environment setup beyond the Node 22 `PATH` prefix. Confirmed before and after every run: isolated ports freed; the live preview emulator (default ports, `./emulator-data`) healthy and completely unchanged (same file timestamps, `holds`/`bookings` untouched).
+
+#### Files changed
+
+`functions/src/cancelManualBooking.ts` (new), `functions/src/index.ts` (export), `functions/src/lib/inventory.ts` (`IntervalStatus` +`"cancelled"`, new `cancelManualBookingTransactional`), `functions/src/lib/validation.ts` (new `validateCancelManualBookingRequest`), `functions/src/lib/schedule.ts` (`DisplayStatus` +`"cancelled"`, `ScheduleBooking`/`RawBooking` +`source`/`cancellationReason`), `functions/tests/cancelManualBooking.emulator.test.ts` (new, 18 tests); `app/src/components/staff/CancelBookingDialog.tsx` (new), `app/src/components/ui/{dialog,textarea}.tsx` (new), `app/src/components/staff/scheduleFormat.ts` (`isCancelEligible`, `STATUS_BADGE_VARIANT` +`cancelled`), `app/src/routes/staff/StaffSchedule.tsx` (cancel button, dialog wiring, refresh-on-success), `app/src/data/firebase/staffApi.ts` (`ScheduleBooking` fields, `CancelManualBooking*` types/error/wrapper), `app/src/i18n/translations.ts` (`staff.statusCancelled` + `staff.cancelBooking.*`, both languages); `app/e2e/cancelManualBooking.emulator.spec.ts` (new, 5 tests); `docs/DECISIONS.md` (D15, open item #6 update); `docs/PROGRESS.md` (this section).
+
+#### Known limitations / honest gaps
+
+- No Owner override for an already-started or past booking — deliberately not built this phase (see D15, open item #6). A future phase needs an explicit owner decision on the exact cutoff/condition before that's implemented.
+- No extension approval, no Party (room 6) manual entry, no payment recording/confirmation — all still out of scope, unchanged from Phase 5.
+- The owner overview's `ScheduleCounts` (`getOwnerOverview`) was not extended with a `cancelled` count — cancelled bookings still count toward `total` but not toward any specific sub-category. Not requested this phase; a small, low-risk follow-up if the owner overview should surface cancellation counts.
+- `cancellationReason` is stored and returned by the API and visible via direct Firestore inspection, but the staff schedule UI doesn't currently render it inline on the row (only the "Cancelled" badge) — the booking's history is fully preserved and retrievable, just not surfaced as extra UI text this phase; a small follow-up if staff want to see the reason at a glance without opening the (now cancelled) booking's original dialog context.
+
+### Phase 7 — proposed next steps (not started, not approved)
+
+- **7a. Resolve remaining open decisions**: exact deposit amount (#3), party notice definition (#1) and duration (#2), the Owner-override-for-started-bookings cutoff (#6, remaining half) — needed before payment/confirmation, that override, or Party manual-entry work.
+- **7b. Staff/owner mutations, part 3**: extension approval, and Party (Room 6) manual entry with staff-set start/end time (D2's open duration question) — through the same inventory transaction pattern, each with its own audit entries.
+- **7c. Payment confirmation**: once the deposit question is answered, a `confirmBooking`-style function transitioning `pending_hold` → `confirmed`, and a way to record an operational (cash/other) payment against a manual booking, transitioning its `paymentStatus` away from `"unpaid"` — still no live PayHere without explicit approval.
+- **7d. Owner MFA**, if/when Identity Platform + Blaze billing is approved.
+- **7e. Lazy-load the emulator adapters** to undo the Phase 3 bundle-size regression, if that becomes a priority before real users see the fixture-mode marketing pages.
 
 Not started until you approve one.

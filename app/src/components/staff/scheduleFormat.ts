@@ -1,4 +1,5 @@
 import type { DisplayStatus, ScheduleBooking } from "@/data/firebase/staffApi";
+import { getColomboMinuteOfDay, getColomboTodayISO } from "@/lib/colomboTime";
 
 /** Fixed room set — see packages/booking-core/src/packageCatalog.ts (rooms 1-6 never change). */
 export const ROOM_IDS = ["room-1", "room-2", "room-3", "room-4", "room-5", "room-6"] as const;
@@ -36,9 +37,34 @@ export function groupByRoom(
   return map;
 }
 
-export const STATUS_BADGE_VARIANT: Record<DisplayStatus, "warning" | "outline" | "positive" | "default"> = {
+export const STATUS_BADGE_VARIANT: Record<DisplayStatus, "warning" | "outline" | "positive" | "negative" | "default"> = {
   "active-hold": "warning",
   "expired-hold": "outline",
   confirmed: "positive",
+  cancelled: "negative",
   other: "default",
 };
+
+const MANUAL_BOOKING_SOURCES = new Set(["staff_walkin", "staff_phone"]);
+
+/**
+ * Cosmetic-only eligibility check for whether to show a Cancel action on a
+ * schedule row — mirrors functions/src/lib/inventory.ts's
+ * cancelManualBookingTransactional rules exactly, but this is NOT the
+ * actual control: the server re-checks every one of these conditions
+ * itself (docs/SECURITY.md §3: "UI hiding of buttons is cosmetic only and
+ * never the actual control"). `scheduleDateISO` is the date the schedule
+ * page is currently showing (every booking in a given schedule response
+ * shares it — see functions/src/lib/schedule.ts).
+ */
+export function isCancelEligible(booking: ScheduleBooking, scheduleDateISO: string): boolean {
+  if (booking.displayStatus !== "confirmed") return false;
+  if (!booking.source || !MANUAL_BOOKING_SOURCES.has(booking.source)) return false;
+  if (booking.paymentStatus !== "unpaid") return false;
+  if (booking.roomId === PARTY_ROOM_ID) return false;
+
+  const todayISO = getColomboTodayISO();
+  const nowMinute = getColomboMinuteOfDay();
+  const hasStarted = scheduleDateISO < todayISO || (scheduleDateISO === todayISO && booking.startMinute <= nowMinute);
+  return !hasStarted;
+}

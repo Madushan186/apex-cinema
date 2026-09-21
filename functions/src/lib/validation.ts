@@ -7,6 +7,12 @@ import { getPackageFacts, isPublicStartTime, isValidDateISO, isValidPeopleCount 
 const MAX_STRING_LENGTH = 200;
 const MIN_IDEMPOTENCY_KEY_LENGTH = 8;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
+const MAX_CANCELLATION_REASON_LENGTH = 500;
+// Firestore auto-generated document ids are 20 alphanumeric characters, but
+// this is deliberately a little more generous/defensive than exact-20 —
+// the point is bounding the length and character set, not pinning to one
+// SDK's current id format.
+const BOOKING_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 const EMAIL_PATTERN = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{1,24}$/;
 const SL_PHONE_PATTERN = /^(?:\+94|0)\d{9}$/;
@@ -179,6 +185,37 @@ export function validateManualBookingRequest(data: unknown): ValidatedManualBook
     source,
     staffNote,
     idempotencyKey: d.idempotencyKey as string,
+  };
+}
+
+export interface ValidatedCancelManualBookingRequest {
+  readonly bookingId: string;
+  readonly reason: string;
+}
+
+/**
+ * Validates only shape/presence — bookingId a plausible id string, reason a
+ * non-empty, length-bounded string. Every actual eligibility rule (booking
+ * exists, is a confirmed/unpaid/manual/standard-room booking, hasn't
+ * started yet) is checked server-side inside
+ * cancelManualBookingTransactional, which needs to read the booking doc
+ * anyway — duplicating those checks here would just be a second place for
+ * them to drift out of sync.
+ */
+export function validateCancelManualBookingRequest(data: unknown): ValidatedCancelManualBookingRequest {
+  if (!data || typeof data !== "object") invalid("Request body must be an object.");
+  const d = data as Record<string, unknown>;
+
+  if (typeof d.bookingId !== "string" || !BOOKING_ID_PATTERN.test(d.bookingId)) {
+    invalid("A valid bookingId is required.");
+  }
+  if (!isNonEmptyBoundedString(d.reason, MAX_CANCELLATION_REASON_LENGTH)) {
+    invalid(`A cancellation reason is required (1–${MAX_CANCELLATION_REASON_LENGTH} characters).`);
+  }
+
+  return {
+    bookingId: d.bookingId as string,
+    reason: (d.reason as string).trim(),
   };
 }
 
