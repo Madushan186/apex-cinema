@@ -42,7 +42,9 @@ interface ManualBookingResult {
   currency: "LKR";
   startISO: string;
   endISO: string;
-  paymentStatus: "unpaid";
+  amountPaidMinor: number;
+  balanceDueMinor: number;
+  paymentStatus: "unpaid" | "partially_paid" | "paid";
 }
 
 interface ManualBookingRequest {
@@ -56,6 +58,7 @@ interface ManualBookingRequest {
   source: "staff_walkin" | "staff_phone";
   staffNote?: string;
   idempotencyKey: string;
+  advanceReceivedConfirmation: true;
   [extra: string]: unknown;
 }
 
@@ -95,6 +98,7 @@ function manualBooking(dateISO: string, time: string, overrides: Partial<ManualB
     source: "staff_walkin",
     staffNote: "",
     idempotencyKey: `manual-test-${Math.random().toString(36).slice(2)}`,
+    advanceReceivedConfirmation: true,
     ...overrides,
   };
 }
@@ -167,26 +171,50 @@ describe("authorization", () => {
 });
 
 describe("staff and owner can create valid manual reservations", () => {
-  it("staff creates a confirmed, unpaid reservation with a server-assigned room and price", async () => {
+  it("staff creates a confirmed reservation with a server-assigned room/price and the LKR 1,000 advance recorded", async () => {
     await signInAs(STAFF_EMAIL);
     const dateISO = addDaysToColomboToday(181);
     const result = await createManualBooking(manualBooking(dateISO, "09:00", { packageId: "non-ac" }));
     expect(result.data.roomId).toMatch(/^room-[1-3]$/);
     expect(result.data.totalAmountMinor).toBe(230000); // non-ac: LKR 2,300
-    expect(result.data.paymentStatus).toBe("unpaid");
+    expect(result.data.amountPaidMinor).toBe(100000); // docs/DECISIONS.md D17: LKR 1,000 advance
+    expect(result.data.balanceDueMinor).toBe(130000); // 2,300 - 1,000
+    expect(result.data.paymentStatus).toBe("partially_paid");
     expect(result.data.referenceCode).toMatch(/^APX-/);
   });
 
-  it("owner creates a confirmed, unpaid reservation", async () => {
+  it("owner creates a confirmed reservation with the advance recorded", async () => {
     await signInAs(OWNER_EMAIL);
     const dateISO = addDaysToColomboToday(182);
     const result = await createManualBooking(manualBooking(dateISO, "12:00", { packageId: "ac-large", peopleCount: 4 }));
     expect(result.data.roomId).toBe("room-5");
     expect(result.data.totalAmountMinor).toBe(450000); // ac-large: LKR 4,500
-    expect(result.data.paymentStatus).toBe("unpaid");
+    expect(result.data.amountPaidMinor).toBe(100000);
+    expect(result.data.balanceDueMinor).toBe(350000);
+    expect(result.data.paymentStatus).toBe("partially_paid");
   });
 
-  it("the created booking is bookingStatus=confirmed, paymentStatus=unpaid, with no customer PII in the audit log", async () => {
+  it("rejects creation when advanceReceivedConfirmation is missing or not literally true — no booking, inventory, payment, or audit record is created", async () => {
+    await signInAs(STAFF_EMAIL);
+    const dateISO = addDaysToColomboToday(300);
+
+    for (const badValue of [false, "yes", 1, undefined]) {
+      await expect(
+        createManualBooking(
+          manualBooking(dateISO, "09:00", { advanceReceivedConfirmation: badValue as true }),
+        ),
+      ).rejects.toMatchObject({ code: "functions/invalid-argument" });
+    }
+
+    // Confirm nothing was created at all for this slot — the room is still free.
+    const db = getFirestore();
+    const snap = await db.collection(COLLECTIONS.inventory).doc(inventoryDocId("room-4", dateISO)).get();
+    expect(snap.exists).toBe(false);
+    const succeeded = await createManualBooking(manualBooking(dateISO, "09:00"));
+    expect(succeeded.data.roomId).toBe("room-4");
+  });
+
+  it("the created booking is bookingStatus=confirmed, paymentStatus=partially_paid, with an advance payment record and no customer PII in the audit log", async () => {
     await signInAs(STAFF_EMAIL);
     const dateISO = addDaysToColomboToday(183);
     const result = await createManualBooking(manualBooking(dateISO, "15:00", { source: "staff_phone", staffNote: "Called ahead" }));
@@ -195,15 +223,26 @@ describe("staff and owner can create valid manual reservations", () => {
     const bookingSnap = await db.collection(COLLECTIONS.bookings).doc(result.data.bookingId).get();
     const booking = bookingSnap.data();
     expect(booking?.bookingStatus).toBe("confirmed");
-    expect(booking?.paymentStatus).toBe("unpaid");
+    expect(booking?.paymentStatus).toBe("partially_paid");
+    expect(booking?.amountPaidMinor).toBe(100000);
     expect(booking?.source).toBe("staff_phone");
     expect(booking?.createdBy).toBeTruthy();
+
+    // The advance itself — a real payment ledger entry (docs/DECISIONS.md D17).
+    const paymentsSnap = await db.collection(COLLECTIONS.bookings).doc(result.data.bookingId).collection("payments").get();
+    expect(paymentsSnap.docs).toHaveLength(1);
+    const payment = paymentsSnap.docs[0]?.data();
+    expect(payment?.amountMinor).toBe(100000);
+    expect(payment?.method).toBe("cash");
+    expect(payment?.kind).toBe("advance");
+    expect(payment?.recordedByUid).toBeTruthy();
 
     const auditSnap = await db.collection(COLLECTIONS.auditLog).where("targetId", "==", result.data.bookingId).get();
     expect(auditSnap.docs).toHaveLength(1);
     const audit = auditSnap.docs[0]?.data();
     expect(audit?.action).toBe("manual_booking_created");
     expect(audit?.actorUid).toBeTruthy();
+    expect(audit?.advanceAmountMinor).toBe(100000);
     // No customer PII in the audit entry (docs/SECURITY.md §8).
     const auditKeys = Object.keys(audit ?? {});
     expect(auditKeys).not.toContain("customerName");
@@ -431,7 +470,11 @@ describe("failed operations leave no partial writes", () => {
     const db = getFirestore();
     const inventoryRef = db.collection(COLLECTIONS.inventory).doc(inventoryDocId("room-4", dateISO));
     const before = ((await inventoryRef.get()).data()?.intervals ?? []) as unknown[];
-    const auditBefore = (await db.collection(COLLECTIONS.auditLog).get()).size;
+    // Scoped to this test's own date, not a raw whole-collection count —
+    // other test FILES run concurrently against the same emulator project
+    // and write their own audit entries at unrelated dates/times, which a
+    // global count would race against.
+    const auditBefore = (await db.collection(COLLECTIONS.auditLog).where("dateISO", "==", dateISO).get()).size;
 
     await expect(createManualBooking(manualBooking(dateISO, "09:00"))).rejects.toMatchObject({
       code: "functions/failed-precondition",
@@ -439,7 +482,7 @@ describe("failed operations leave no partial writes", () => {
 
     const after = ((await inventoryRef.get()).data()?.intervals ?? []) as unknown[];
     expect(after).toHaveLength(before.length);
-    const auditAfter = (await db.collection(COLLECTIONS.auditLog).get()).size;
+    const auditAfter = (await db.collection(COLLECTIONS.auditLog).where("dateISO", "==", dateISO).get()).size;
     expect(auditAfter).toBe(auditBefore);
   });
 });

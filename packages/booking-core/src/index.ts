@@ -16,6 +16,7 @@ export { SLOT_TIMES } from "./types";
 export { intervalsOverlap } from "./intervals";
 
 export {
+  ADVANCE_AMOUNT_LKR,
   CLOSE_MINUTE,
   DEFAULT_HOLD_DURATION_MINUTES,
   EXTENSION_FEE_LKR,
@@ -23,6 +24,8 @@ export {
   OPEN_MINUTE,
   SESSION_MINUTES,
   computeEndMinute,
+  currentBookingTotalMinor,
+  derivePaymentStatus,
   endsWithinBusinessHours,
   isPublicStartMinute,
   isPublicStartTime,

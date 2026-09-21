@@ -35,7 +35,12 @@ async function signInStaffAnyLocale(page: Page): Promise<void> {
   await expect(page.getByRole("link", { name: "New Manual Booking" })).toBeVisible();
 }
 
-/** Creates a manual booking through the real UI flow (form → review → confirm) and lands back on the schedule for that date. */
+/** docs/DECISIONS.md D17 — must be explicitly checked before Confirm can proceed; never preselected. "cash advance" appears verbatim in both English and Sinhala copy. */
+async function checkAdvanceReceived(page: Page): Promise<void> {
+  await page.getByLabel(/cash advance/i).check();
+}
+
+/** Creates a manual booking through the real UI flow (form → review → confirm) and lands back on the schedule for that date. Carries the D17 advance, so it's always at least "partially_paid", never "unpaid". */
 async function createManualBookingViaUI(
   page: Page,
   opts: { packageLabel: string; dateISO: string; time: string; name: string; phone: string },
@@ -53,6 +58,7 @@ async function createManualBookingViaUI(
 
   await page.getByRole("button", { name: "Review booking" }).click();
   await expect(page.getByRole("heading", { name: "Review booking" })).toBeVisible();
+  await checkAdvanceReceived(page);
   await page.getByRole("button", { name: "Confirm booking" }).click();
   await expect(page.getByRole("status").getByText("Booking confirmed")).toBeVisible({ timeout: 10_000 });
 
@@ -88,7 +94,7 @@ test.describe("staff manual-booking extension — desktop @emulator", () => {
     await expect(dialog.getByText("LKR 1,000")).toBeVisible(); // additional charge
     // AC Small is LKR 3,200 — new total after one extension is LKR 4,200.
     await expect(dialog.getByText("LKR 4,200")).toBeVisible();
-    await expect(page.getByText("Payment not recorded", { exact: false })).toBeVisible();
+    await expect(page.getByText("This does not record a payment", { exact: false })).toBeVisible();
 
     await page.getByRole("button", { name: "Confirm extension" }).click();
 
@@ -97,8 +103,9 @@ test.describe("staff manual-booking extension — desktop @emulator", () => {
     await expect(page.getByRole("heading", { name: "Extend this booking by 1 hour?" })).not.toBeVisible();
     await expect(page.getByText("09:00–13:00", { exact: false })).toBeVisible();
     await expect(page.getByText("extended +1h", { exact: false })).toBeVisible();
-    // Still shows Unpaid — extension never changes payment status.
-    await expect(page.getByText("Unpaid", { exact: true })).toBeVisible();
+    // Still shows Partially paid (LKR 1,000 advance against a now-LKR-4,200
+    // total) — extension never changes the amount actually paid.
+    await expect(page.getByText("Partially paid", { exact: false })).toBeVisible();
   });
 
   test("Escape closes the dialog without extending — keyboard navigation", async ({ page }) => {
@@ -197,6 +204,7 @@ test.describe("staff manual-booking extension — Sinhala @emulator", () => {
     await page.getByLabel("Customer නම").fill("Sinhala Extend Customer");
     await page.getByLabel("Customer Phone").fill("0771260005");
     await page.getByRole("button", { name: "Booking එක Review කරන්න" }).click();
+    await checkAdvanceReceived(page);
     await page.getByRole("button", { name: "Booking එක Confirm කරන්න" }).click();
     await expect(page.getByRole("status").getByText("Booking එක Confirmed")).toBeVisible({ timeout: 10_000 });
     await page.getByRole("button", { name: /Schedule එකට ආපහු/ }).click();

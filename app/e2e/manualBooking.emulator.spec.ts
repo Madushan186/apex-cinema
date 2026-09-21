@@ -38,6 +38,18 @@ async function signInStaffAnyLocale(page: Page): Promise<void> {
   await expect(page.getByRole("link", { name: "New Manual Booking" })).toBeVisible();
 }
 
+/**
+ * docs/DECISIONS.md D17 — every new booking requires an explicit staff
+ * confirmation that the LKR 1,000 cash advance was received, checked on the
+ * review step before Confirm can proceed. Never checked automatically by
+ * this helper unless the caller actually wants to simulate staff having
+ * done so — every test below calls this deliberately, right before
+ * clicking Confirm, exactly like a real staff member would.
+ */
+async function checkAdvanceReceived(page: Page): Promise<void> {
+  await page.getByLabel(/cash advance has been received/i).check();
+}
+
 async function fillManualBookingForm(
   page: Page,
   opts: { packageLabel: string; dateISO: string; time: string; people: string; name: string; phone: string },
@@ -76,15 +88,22 @@ test.describe("staff manual booking — desktop @emulator", () => {
 
     await page.getByRole("button", { name: "Review booking" }).click();
     await expect(page.getByRole("heading", { name: "Review booking" })).toBeVisible();
-    await expect(page.getByText("Payment not recorded — unpaid")).toBeVisible();
+    await expect(page.getByText("Every new booking requires an LKR 1,000 cash advance", { exact: false })).toBeVisible();
     await expect(page.getByText("Nimal Perera")).toBeVisible();
 
+    // Confirm is blocked until the advance is explicitly confirmed — never preselected.
+    await page.getByRole("button", { name: "Confirm booking" }).click();
+    await expect(page.getByText("Confirm the cash advance was received", { exact: false })).toBeVisible();
+    await expect(page.getByRole("status").getByText("Booking confirmed")).toHaveCount(0);
+
+    await checkAdvanceReceived(page);
     await page.getByRole("button", { name: "Confirm booking" }).click();
 
     await expect(page.getByRole("status").getByText("Booking confirmed")).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText(/APX-/)).toBeVisible();
     await expect(page.getByText("Room 4")).toBeVisible();
-    await expect(page.getByText("Unpaid", { exact: true })).toBeVisible();
+    // AC Small (LKR 3,200) minus the LKR 1,000 advance — partially paid, not unpaid.
+    await expect(page.getByText("Partially paid", { exact: false })).toBeVisible();
 
     // "Back to schedule" carries the booked date so the new booking is
     // immediately visible without extra navigation.
@@ -92,7 +111,7 @@ test.describe("staff manual booking — desktop @emulator", () => {
     await expect(page.getByRole("heading", { name: "Today's Schedule" })).toBeVisible();
     await expect(page.getByText("09:00–12:00")).toBeVisible();
     await expect(page.getByText("Nimal Perera")).toBeVisible();
-    await expect(page.getByText("Unpaid", { exact: true })).toBeVisible();
+    await expect(page.getByText("Partially paid", { exact: false })).toBeVisible();
     await expect(page.getByText("Confirmed", { exact: true })).toBeVisible();
 
     // The same slot is now unavailable in the PUBLIC booking wizard.
@@ -126,8 +145,9 @@ test.describe("staff manual booking — 390px mobile @emulator", () => {
 
     await page.getByRole("button", { name: "Review booking" }).click();
     await expect(page.getByRole("heading", { name: "Review booking" })).toBeVisible();
-    await expect(page.getByText("Payment not recorded — unpaid")).toBeVisible();
+    await expect(page.getByText("Every new booking requires an LKR 1,000 cash advance", { exact: false })).toBeVisible();
 
+    await checkAdvanceReceived(page);
     await page.getByRole("button", { name: "Confirm booking" }).click();
     await expect(page.getByRole("status").getByText("Booking confirmed")).toBeVisible({ timeout: 10_000 });
 
@@ -289,6 +309,7 @@ test.describe("staff manual booking — conflict/race @emulator", () => {
     // The staff member's original submission now hits a real conflict —
     // this is not simulated, it's the actual server rejecting the actual
     // second request for the actual now-occupied room.
+    await checkAdvanceReceived(page);
     await page.getByRole("button", { name: "Confirm booking" }).click();
     await expect(
       page.getByText(
@@ -313,6 +334,7 @@ test.describe("staff manual booking — conflict/race @emulator", () => {
     // — this must succeed for real, ending on the actual success screen.
     await page.getByRole("button", { name: /^12:00/ }).click();
     await page.getByRole("button", { name: "Review booking" }).click();
+    await checkAdvanceReceived(page);
     await page.getByRole("button", { name: "Confirm booking" }).click();
 
     await expect(page.getByRole("status").getByText("Booking confirmed")).toBeVisible({ timeout: 10_000 });

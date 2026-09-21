@@ -42,7 +42,9 @@ interface ManualBookingResult {
   currency: "LKR";
   startISO: string;
   endISO: string;
-  paymentStatus: "unpaid";
+  amountPaidMinor: number;
+  balanceDueMinor: number;
+  paymentStatus: "unpaid" | "partially_paid" | "paid";
 }
 
 interface ManualBookingRequest {
@@ -56,6 +58,7 @@ interface ManualBookingRequest {
   source: "staff_walkin" | "staff_phone";
   staffNote?: string;
   idempotencyKey: string;
+  advanceReceivedConfirmation: true;
   [extra: string]: unknown;
 }
 
@@ -110,8 +113,77 @@ function manualBooking(dateISO: string, time: string, overrides: Partial<ManualB
     source: "staff_walkin",
     staffNote: "",
     idempotencyKey: `cancel-test-create-${Math.random().toString(36).slice(2)}`,
+    advanceReceivedConfirmation: true,
     ...overrides,
   };
+}
+
+const LEGACY_PACKAGE_FACTS: Record<string, { roomId: string; totalAmountMinor: number }> = {
+  "ac-small": { roomId: "room-4", totalAmountMinor: 320000 },
+  "ac-large": { roomId: "room-5", totalAmountMinor: 450000 },
+};
+
+/**
+ * Writes a booking doc + matching inventory interval directly, bypassing
+ * createManualBooking entirely, to simulate a manual reservation created
+ * BEFORE docs/DECISIONS.md D17 — confirmed, paymentStatus "unpaid", no
+ * amountPaidMinor field at all (the exact pre-D17 shape). D17 requires
+ * every booking created through the real API from now on to record the
+ * LKR 1,000 advance, which in turn blocks cancellation — so testing the
+ * "existing unpaid cancellation behavior is preserved" requirement (D17's
+ * own brief) needs a booking that predates that requirement. Mirrors the
+ * synthetic-write pattern already used below for the Party/already-started
+ * scenarios.
+ */
+async function createLegacyUnpaidBooking(
+  dateISO: string,
+  time: string,
+  overrides: { packageId?: "ac-small" | "ac-large"; name?: string; phone?: string } = {},
+): Promise<{ bookingId: string; roomId: string; referenceCode: string }> {
+  const db = getFirestore();
+  const packageId = overrides.packageId ?? "ac-small";
+  const facts = LEGACY_PACKAGE_FACTS[packageId];
+  if (!facts) throw new Error(`No LEGACY_PACKAGE_FACTS entry for ${packageId}`);
+  const [hh, mm] = time.split(":").map(Number);
+  const startMinute = (hh ?? 0) * 60 + (mm ?? 0);
+  const endMinute = startMinute + 180;
+
+  const bookingRef = db.collection(COLLECTIONS.bookings).doc();
+  const referenceCode = `APX-LEGACY${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+  await bookingRef.set({
+    packageId,
+    roomId: facts.roomId,
+    dateISO,
+    startMinute,
+    endMinute,
+    bookingStatus: "confirmed",
+    paymentStatus: "unpaid",
+    totalAmountMinor: facts.totalAmountMinor,
+    currency: "LKR",
+    peopleCount: 2,
+    customerName: overrides.name ?? "Legacy Test Customer",
+    customerPhone: overrides.phone ?? "0770000099",
+    customerEmail: "",
+    referenceCode,
+    source: "staff_walkin",
+    createdBy: "synthetic-legacy-setup",
+    staffNote: "",
+    idempotencyKey: `legacy-${Math.random().toString(36).slice(2)}`,
+    createdAt: new Date(),
+  });
+
+  const inventoryRef = db.collection(COLLECTIONS.inventory).doc(inventoryDocId(facts.roomId, dateISO));
+  const existingIntervals = ((await inventoryRef.get()).data()?.intervals ?? []) as unknown[];
+  await inventoryRef.set({
+    roomId: facts.roomId,
+    dateISO,
+    intervals: [
+      ...existingIntervals,
+      { bookingId: bookingRef.id, startMinute, endMinute, status: "confirmed", holdExpiresAtMillis: null },
+    ],
+  });
+
+  return { bookingId: bookingRef.id, roomId: facts.roomId, referenceCode };
 }
 
 function guestHold(dateISO: string, time: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -171,21 +243,21 @@ describe("authorization", () => {
   });
 });
 
-describe("staff and owner can cancel a valid manual reservation", () => {
+describe("staff and owner can cancel a valid manual reservation (a legacy booking with no recorded payment — docs/DECISIONS.md D17)", () => {
   it("staff cancels a confirmed manual booking", async () => {
     await signInAs(STAFF_EMAIL);
     const dateISO = addDaysToColomboToday(210);
-    const created = await createManualBooking(manualBooking(dateISO, "09:00"));
+    const created = await createLegacyUnpaidBooking(dateISO, "09:00");
 
-    const result = await cancelManualBooking({ bookingId: created.data.bookingId, reason: "Customer called to cancel" });
+    const result = await cancelManualBooking({ bookingId: created.bookingId, reason: "Customer called to cancel" });
     expect(result.data.bookingStatus).toBe("cancelled");
-    expect(result.data.bookingId).toBe(created.data.bookingId);
-    expect(result.data.roomId).toBe(created.data.roomId);
+    expect(result.data.bookingId).toBe(created.bookingId);
+    expect(result.data.roomId).toBe(created.roomId);
     expect(typeof result.data.cancelledAtMillis).toBe("number");
     expect(result.data.cancelledAtMillis).toBeGreaterThan(0);
 
     const db = getFirestore();
-    const bookingSnap = await db.collection(COLLECTIONS.bookings).doc(created.data.bookingId).get();
+    const bookingSnap = await db.collection(COLLECTIONS.bookings).doc(created.bookingId).get();
     const booking = bookingSnap.data();
     expect(booking?.bookingStatus).toBe("cancelled");
     // Payment status is never touched by cancellation (docs/DECISIONS.md D12/D15).
@@ -193,29 +265,29 @@ describe("staff and owner can cancel a valid manual reservation", () => {
     expect(booking?.cancellationReason).toBe("Customer called to cancel");
     expect(booking?.cancelledBy).toBeTruthy();
     // Booking history is preserved, not deleted — original fields untouched.
-    expect(booking?.customerName).toBe("Test Customer");
-    expect(booking?.referenceCode).toBe(created.data.referenceCode);
+    expect(booking?.customerName).toBe("Legacy Test Customer");
+    expect(booking?.referenceCode).toBe(created.referenceCode);
   });
 
   it("owner cancels a confirmed manual booking", async () => {
     await signInAs(OWNER_EMAIL);
     const dateISO = addDaysToColomboToday(211);
-    const created = await createManualBooking(manualBooking(dateISO, "12:00"));
+    const created = await createLegacyUnpaidBooking(dateISO, "12:00");
 
-    const result = await cancelManualBooking({ bookingId: created.data.bookingId, reason: "Double-booked by phone" });
+    const result = await cancelManualBooking({ bookingId: created.bookingId, reason: "Double-booked by phone" });
     expect(result.data.bookingStatus).toBe("cancelled");
   });
 
   it("writes exactly one manual_booking_cancelled audit entry with a before/after diff and no customer PII", async () => {
     await signInAs(STAFF_EMAIL);
     const dateISO = addDaysToColomboToday(212);
-    const created = await createManualBooking(manualBooking(dateISO, "15:00", { name: "Should Not Leak", phone: "0779998888" }));
-    await cancelManualBooking({ bookingId: created.data.bookingId, reason: "No longer needed — should not leak into audit" });
+    const created = await createLegacyUnpaidBooking(dateISO, "15:00", { name: "Should Not Leak", phone: "0779998888" });
+    await cancelManualBooking({ bookingId: created.bookingId, reason: "No longer needed — should not leak into audit" });
 
     const db = getFirestore();
     const auditSnap = await db
       .collection(COLLECTIONS.auditLog)
-      .where("targetId", "==", created.data.bookingId)
+      .where("targetId", "==", created.bookingId)
       .where("action", "==", "manual_booking_cancelled")
       .get();
     expect(auditSnap.docs).toHaveLength(1);
@@ -237,14 +309,17 @@ describe("staff and owner can cancel a valid manual reservation", () => {
   it("releases the inventory interval — the same slot can be booked again without double-booking", async () => {
     await signInAs(STAFF_EMAIL);
     const dateISO = addDaysToColomboToday(213);
-    const first = await createManualBooking(manualBooking(dateISO, "18:00", { packageId: "ac-large" }));
-    await cancelManualBooking({ bookingId: first.data.bookingId, reason: "Freeing this slot up again" });
+    const first = await createLegacyUnpaidBooking(dateISO, "18:00", { packageId: "ac-large" });
+    await cancelManualBooking({ bookingId: first.bookingId, reason: "Freeing this slot up again" });
 
     // The exact same room/date/time is bookable again — proves the release
     // actually happened, not just that the booking doc says "cancelled".
+    // This second booking goes through the REAL create path (so it carries
+    // the D17 advance) — cancellation itself is what's under test here, not
+    // whether the new booking can later be cancelled too.
     const second = await createManualBooking(manualBooking(dateISO, "18:00", { packageId: "ac-large" }));
-    expect(second.data.bookingId).not.toBe(first.data.bookingId);
-    expect(second.data.roomId).toBe(first.data.roomId);
+    expect(second.data.bookingId).not.toBe(first.bookingId);
+    expect(second.data.roomId).toBe(first.roomId);
 
     // Never two active bookings for the same room/time at once — a third,
     // concurrent attempt for the same now-reoccupied slot must fail.
@@ -253,9 +328,9 @@ describe("staff and owner can cancel a valid manual reservation", () => {
     });
 
     const db = getFirestore();
-    const snap = await db.collection(COLLECTIONS.inventory).doc(inventoryDocId(first.data.roomId, dateISO)).get();
+    const snap = await db.collection(COLLECTIONS.inventory).doc(inventoryDocId(first.roomId, dateISO)).get();
     const intervals = (snap.data()?.intervals ?? []) as Array<Record<string, unknown>>;
-    const firstInterval = intervals.find((i) => i.bookingId === first.data.bookingId);
+    const firstInterval = intervals.find((i) => i.bookingId === first.bookingId);
     const secondInterval = intervals.find((i) => i.bookingId === second.data.bookingId);
     expect(firstInterval?.status).toBe("cancelled");
     expect(firstInterval?.holdExpiresAtMillis).toBeNull();
@@ -265,20 +340,68 @@ describe("staff and owner can cancel a valid manual reservation", () => {
   it("cancelling one booking has no effect on a different booking's interval, same room and date", async () => {
     await signInAs(STAFF_EMAIL);
     const dateISO = addDaysToColomboToday(214);
-    const morning = await createManualBooking(manualBooking(dateISO, "09:00", { packageId: "ac-large" }));
-    const afternoon = await createManualBooking(manualBooking(dateISO, "15:00", { packageId: "ac-large" }));
+    const morning = await createLegacyUnpaidBooking(dateISO, "09:00", { packageId: "ac-large" });
+    const afternoon = await createLegacyUnpaidBooking(dateISO, "15:00", { packageId: "ac-large" });
 
-    await cancelManualBooking({ bookingId: morning.data.bookingId, reason: "Cancelling only the morning session" });
+    await cancelManualBooking({ bookingId: morning.bookingId, reason: "Cancelling only the morning session" });
 
     const db = getFirestore();
-    const bookingSnap = await db.collection(COLLECTIONS.bookings).doc(afternoon.data.bookingId).get();
+    const bookingSnap = await db.collection(COLLECTIONS.bookings).doc(afternoon.bookingId).get();
     expect(bookingSnap.data()?.bookingStatus).toBe("confirmed");
 
     const snap = await db.collection(COLLECTIONS.inventory).doc(inventoryDocId("room-5", dateISO)).get();
     const intervals = (snap.data()?.intervals ?? []) as Array<Record<string, unknown>>;
-    const afternoonInterval = intervals.find((i) => i.bookingId === afternoon.data.bookingId);
+    const afternoonInterval = intervals.find((i) => i.bookingId === afternoon.bookingId);
     expect(afternoonInterval?.status).toBe("confirmed");
     expect(afternoonInterval?.holdExpiresAtMillis).toBeNull();
+  });
+});
+
+describe("a recorded payment blocks cancellation (docs/DECISIONS.md D17)", () => {
+  it("rejects cancelling a booking created via createManualBooking — every new booking has the LKR 1,000 advance recorded", async () => {
+    await signInAs(STAFF_EMAIL);
+    const dateISO = addDaysToColomboToday(223);
+    const created = await createManualBooking(manualBooking(dateISO, "09:00"));
+    expect(created.data.amountPaidMinor).toBeGreaterThan(0); // sanity: the advance really was recorded
+
+    await expect(
+      cancelManualBooking({ bookingId: created.data.bookingId, reason: "Attempting to cancel a booking with a recorded payment" }),
+    ).rejects.toMatchObject({
+      code: "functions/failed-precondition",
+      message: expect.stringContaining("recorded payment"),
+    });
+
+    // Never silently refunded, forfeited, or erased — the booking, its
+    // amountPaidMinor, and its payment ledger are all completely untouched
+    // by the rejected attempt.
+    const db = getFirestore();
+    const bookingSnap = await db.collection(COLLECTIONS.bookings).doc(created.data.bookingId).get();
+    const booking = bookingSnap.data();
+    expect(booking?.bookingStatus).toBe("confirmed");
+    expect(booking?.amountPaidMinor).toBe(created.data.amountPaidMinor);
+    expect(booking?.cancelledAtMillis).toBeUndefined();
+    const paymentsSnap = await db.collection(COLLECTIONS.bookings).doc(created.data.bookingId).collection("payments").get();
+    expect(paymentsSnap.docs).toHaveLength(1); // still just the original advance — no refund doc, no change
+  });
+
+  it("rejects cancelling a legacy booking once a payment has been patched onto it directly", async () => {
+    // Simulates a booking that started with no recorded payment (D17-era
+    // schema) but has since had a payment recorded against it via
+    // recordManualBookingPayment (its own dedicated test file) — cancellation
+    // must be blocked exactly the same as a booking that started paid.
+    await signInAs(STAFF_EMAIL);
+    const dateISO = addDaysToColomboToday(224);
+    const created = await createLegacyUnpaidBooking(dateISO, "09:00");
+
+    const db = getFirestore();
+    await db.collection(COLLECTIONS.bookings).doc(created.bookingId).update({ amountPaidMinor: 100000, paymentStatus: "partially_paid" });
+
+    await expect(
+      cancelManualBooking({ bookingId: created.bookingId, reason: "Attempting to cancel a now-paid legacy booking" }),
+    ).rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    const after = await db.collection(COLLECTIONS.bookings).doc(created.bookingId).get();
+    expect(after.data()?.bookingStatus).toBe("confirmed");
   });
 });
 
@@ -286,10 +409,10 @@ describe("repeated cancellation is safe", () => {
   it("cancelling the same booking twice is idempotent — no duplicate audit entry, same result both times", async () => {
     await signInAs(STAFF_EMAIL);
     const dateISO = addDaysToColomboToday(215);
-    const created = await createManualBooking(manualBooking(dateISO, "09:00"));
+    const created = await createLegacyUnpaidBooking(dateISO, "09:00");
 
-    const first = await cancelManualBooking({ bookingId: created.data.bookingId, reason: "First cancel attempt" });
-    const second = await cancelManualBooking({ bookingId: created.data.bookingId, reason: "Second, different reason text" });
+    const first = await cancelManualBooking({ bookingId: created.bookingId, reason: "First cancel attempt" });
+    const second = await cancelManualBooking({ bookingId: created.bookingId, reason: "Second, different reason text" });
 
     expect(second.data.bookingStatus).toBe("cancelled");
     expect(second.data.cancelledAtMillis).toBe(first.data.cancelledAtMillis);
@@ -298,29 +421,29 @@ describe("repeated cancellation is safe", () => {
     const db = getFirestore();
     const auditSnap = await db
       .collection(COLLECTIONS.auditLog)
-      .where("targetId", "==", created.data.bookingId)
+      .where("targetId", "==", created.bookingId)
       .where("action", "==", "manual_booking_cancelled")
       .get();
     expect(auditSnap.docs).toHaveLength(1);
 
     // The FIRST reason wins — a retry never overwrites the original record.
-    const bookingSnap = await db.collection(COLLECTIONS.bookings).doc(created.data.bookingId).get();
+    const bookingSnap = await db.collection(COLLECTIONS.bookings).doc(created.bookingId).get();
     expect(bookingSnap.data()?.cancellationReason).toBe("First cancel attempt");
 
     // The interval is still released exactly once — a single entry, not duplicated.
-    const invSnap = await db.collection(COLLECTIONS.inventory).doc(inventoryDocId(created.data.roomId, dateISO)).get();
+    const invSnap = await db.collection(COLLECTIONS.inventory).doc(inventoryDocId(created.roomId, dateISO)).get();
     const intervals = (invSnap.data()?.intervals ?? []) as Array<Record<string, unknown>>;
-    expect(intervals.filter((i) => i.bookingId === created.data.bookingId)).toHaveLength(1);
+    expect(intervals.filter((i) => i.bookingId === created.bookingId)).toHaveLength(1);
   });
 
   it("true concurrent double-click (two simultaneous cancel calls) still produces exactly one audit entry", async () => {
     await signInAs(STAFF_EMAIL);
     const dateISO = addDaysToColomboToday(216);
-    const created = await createManualBooking(manualBooking(dateISO, "12:00"));
+    const created = await createLegacyUnpaidBooking(dateISO, "12:00");
 
     const results = await Promise.allSettled([
-      cancelManualBooking({ bookingId: created.data.bookingId, reason: "Concurrent attempt A" }),
-      cancelManualBooking({ bookingId: created.data.bookingId, reason: "Concurrent attempt B" }),
+      cancelManualBooking({ bookingId: created.bookingId, reason: "Concurrent attempt A" }),
+      cancelManualBooking({ bookingId: created.bookingId, reason: "Concurrent attempt B" }),
     ]);
     // Both calls are expected to resolve successfully — cancellation is
     // idempotent, not "first wins, second errors."
@@ -329,7 +452,7 @@ describe("repeated cancellation is safe", () => {
     const db = getFirestore();
     const auditSnap = await db
       .collection(COLLECTIONS.auditLog)
-      .where("targetId", "==", created.data.bookingId)
+      .where("targetId", "==", created.bookingId)
       .where("action", "==", "manual_booking_cancelled")
       .get();
     expect(auditSnap.docs).toHaveLength(1);
@@ -428,27 +551,6 @@ describe("ineligible bookings are rejected", () => {
     ).rejects.toMatchObject({ code: "functions/failed-precondition" });
 
     const after = await bookingRef.get();
-    expect(after.data()?.bookingStatus).toBe("confirmed");
-  });
-
-  it("rejects a booking whose paymentStatus is not unpaid, even by direct data manipulation", async () => {
-    // No real way to create a "paid" manual booking this phase (D14 — the
-    // field is fixed at creation) — directly patches an existing
-    // confirmed manual booking's paymentStatus to prove the explicit
-    // unpaid-only check actually rejects it, defense-in-depth against a
-    // future phase that adds payment recording.
-    await signInAs(STAFF_EMAIL);
-    const dateISO = addDaysToColomboToday(222);
-    const created = await createManualBooking(manualBooking(dateISO, "09:00"));
-
-    const db = getFirestore();
-    await db.collection(COLLECTIONS.bookings).doc(created.data.bookingId).update({ paymentStatus: "succeeded" });
-
-    await expect(
-      cancelManualBooking({ bookingId: created.data.bookingId, reason: "Attempting to cancel a paid booking" }),
-    ).rejects.toMatchObject({ code: "functions/failed-precondition" });
-
-    const after = await db.collection(COLLECTIONS.bookings).doc(created.data.bookingId).get();
     expect(after.data()?.bookingStatus).toBe("confirmed");
   });
 

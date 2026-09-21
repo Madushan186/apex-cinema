@@ -1,10 +1,13 @@
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
-import type { BookablePackageId, SlotTime } from "@apex-cinema/booking-core";
+import type { BookablePackageId, PaymentStatus, SlotTime } from "@apex-cinema/booking-core";
 import {
+  ADVANCE_AMOUNT_LKR,
   EXTENSION_FEE_LKR,
   EXTENSION_MINUTES,
   computeEndMinute,
+  currentBookingTotalMinor,
+  derivePaymentStatus,
   endsWithinBusinessHours,
   getColomboMinuteOfDay,
   getColomboTodayISO,
@@ -274,19 +277,32 @@ export async function createHoldTransactional(
  *    submits it, and — because `isActive()` treats "confirmed" as always
  *    active — it never expires the way an online hold does (see
  *    docs/ARCHITECTURE.md §6).
- *  - Writes `paymentStatus: "unpaid"` (docs/DECISIONS.md D14) — booking
- *    confirmation is NOT payment confirmation; no payment collection exists
- *    this phase. This is a fixed value, not an editable field.
+ *  - Requires (and, since docs/DECISIONS.md D17, ALWAYS records) an
+ *    LKR 1,000 cash advance — `params.advanceReceivedConfirmation` is
+ *    already validated as the literal `true` by
+ *    validateManualBookingRequest before this function is ever called.
+ *    Writes `amountPaidMinor: ADVANCE_AMOUNT_MINOR` and a derived
+ *    `paymentStatus` (docs/DECISIONS.md D17 — supersedes D14's
+ *    "confirmation is not payment confirmation, always unpaid" default: a
+ *    manual booking is now never created unpaid) plus one doc in the new
+ *    `bookings/{id}/payments` subcollection recording the advance itself
+ *    (kind, amount, method, who recorded it, when, and the booking's own
+ *    reference code) — all in this SAME transaction as the booking and
+ *    inventory writes, so a room found free but an advance somehow not
+ *    recorded (or vice versa) can never happen.
  *  - Records `createdBy` (the authenticated staff/owner uid) and `source`
  *    ("staff_walkin" | "staff_phone") instead of "online".
  *  - Writes one `auditLog` entry in the same transaction — actor, action,
- *    booking id, room, date, source, server timestamp. Deliberately NO
- *    customer name/phone/email (docs/SECURITY.md §8: audit entries must not
- *    duplicate PII; the booking doc itself is the one place that lives).
+ *    booking id, room, date, source, advance amount, server timestamp.
+ *    Deliberately NO customer name/phone/email (docs/SECURITY.md §8: audit
+ *    entries must not duplicate PII; the booking doc itself is the one
+ *    place that lives) — the advance amount is not PII.
  *  - Idempotency lives in its own `manualBookingIdempotency` collection
  *    (not `holdIdempotency`) and the fingerprint includes `actorUid`, so a
  *    replay is only ever "the same" when it's the same staff/owner account
- *    resubmitting its own attempt.
+ *    resubmitting its own attempt. A retry never writes a second payment
+ *    record — the idempotent no-op branch below returns the cached response
+ *    with no new writes at all, same as before D17.
  */
 export interface CreateManualBookingParams {
   readonly packageId: BookablePackageId;
@@ -299,24 +315,32 @@ export interface CreateManualBookingParams {
   readonly source: ManualBookingSource;
   readonly staffNote: string;
   readonly idempotencyKey: string;
+  /** Already validated as literal `true` by validateManualBookingRequest — see docs/DECISIONS.md D17. */
+  readonly advanceReceivedConfirmation: true;
 }
 
 export interface CreateManualBookingResult {
   readonly bookingId: string;
   readonly referenceCode: string;
   readonly roomId: string;
+  /** Original package price only — never includes the advance or any extension charge. */
   readonly totalAmountMinor: number;
   readonly currency: "LKR";
   readonly startISO: string;
   readonly endISO: string;
-  /** Always "unpaid" this phase — see docs/DECISIONS.md D14. */
-  readonly paymentStatus: "unpaid";
+  /** Always ADVANCE_AMOUNT_MINOR at creation (docs/DECISIONS.md D17) — the LKR 1,000 cash advance just recorded. */
+  readonly amountPaidMinor: number;
+  /** totalAmountMinor - amountPaidMinor, computed. */
+  readonly balanceDueMinor: number;
+  readonly paymentStatus: "unpaid" | "partially_paid" | "paid";
 }
 
 interface ManualIdempotencyRecord {
   readonly fingerprint: string;
   readonly response: CreateManualBookingResult;
 }
+
+const ADVANCE_AMOUNT_MINOR = priceLKRToMinorUnits(ADVANCE_AMOUNT_LKR);
 
 export async function createManualBookingTransactional(
   params: CreateManualBookingParams,
@@ -396,6 +420,14 @@ export async function createManualBookingTransactional(
     const totalAmountMinor = priceLKRToMinorUnits(facts.priceLKR);
     const referenceCode = generateReferenceCode();
 
+    // docs/DECISIONS.md D17 — every new booking requires the LKR 1,000 cash
+    // advance before confirmation, as part of the package total (not an
+    // extra fee). advanceReceivedConfirmation is already validated as the
+    // literal `true` before this function runs — the amount itself is
+    // always this server-side constant, never client-supplied.
+    const amountPaidMinor = ADVANCE_AMOUNT_MINOR;
+    const paymentStatus = derivePaymentStatus(amountPaidMinor, currentBookingTotalMinor(totalAmountMinor, 0));
+
     const newInterval: IntervalRecord = {
       bookingId: bookingRef.id,
       startMinute,
@@ -423,7 +455,8 @@ export async function createManualBookingTransactional(
       startMinute,
       endMinute,
       bookingStatus: "confirmed",
-      paymentStatus: "unpaid",
+      paymentStatus,
+      amountPaidMinor,
       totalAmountMinor,
       currency: "LKR",
       peopleCount: params.peopleCount,
@@ -438,6 +471,21 @@ export async function createManualBookingTransactional(
       createdAt: FieldValue.serverTimestamp(),
     });
 
+    // The advance itself — a real, immutable payment ledger entry, not just
+    // a summary field on the booking (docs/DECISIONS.md D17). Method is
+    // always "cash" this phase (no other collection method is implemented);
+    // this records cash already physically received by staff, it does not
+    // collect anything itself.
+    const paymentRef = bookingRef.collection(COLLECTIONS.bookingPayments).doc();
+    transaction.set(paymentRef, {
+      amountMinor: amountPaidMinor,
+      method: "cash",
+      kind: "advance",
+      recordedByUid: actorUid,
+      referenceCode,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
     const response: CreateManualBookingResult = {
       bookingId: bookingRef.id,
       referenceCode,
@@ -446,14 +494,17 @@ export async function createManualBookingTransactional(
       currency: "LKR",
       startISO: minuteToISO(params.dateISO, startMinute),
       endISO: minuteToISO(params.dateISO, endMinute),
-      paymentStatus: "unpaid",
+      amountPaidMinor,
+      balanceDueMinor: totalAmountMinor - amountPaidMinor,
+      paymentStatus,
     };
 
     const idempotencyRecord: ManualIdempotencyRecord = { fingerprint, response };
     transaction.set(idempotencyRef, { ...idempotencyRecord, createdAt: FieldValue.serverTimestamp() });
 
     // Audit trail — actor, action, and enough to locate the booking, but no
-    // customer PII (docs/SECURITY.md §8).
+    // customer PII (docs/SECURITY.md §8). The advance amount is a fact
+    // about money handled, not a customer detail, so it's fine to include.
     const auditRef = db.collection(COLLECTIONS.auditLog).doc();
     transaction.set(auditRef, {
       actorUid,
@@ -463,6 +514,7 @@ export async function createManualBookingTransactional(
       roomId: freeRoomId,
       dateISO: params.dateISO,
       source: params.source,
+      advanceAmountMinor: amountPaidMinor,
       createdAt: FieldValue.serverTimestamp(),
     });
 
@@ -473,18 +525,24 @@ export async function createManualBookingTransactional(
 /**
  * Cancellation of a confirmed, unpaid, staff/owner-entered manual
  * reservation for a standard room (1–5) — docs/PROGRESS.md "manual-booking
- * cancellation" phase, docs/DECISIONS.md D10/D15. Deliberately narrow, per
- * this phase's approved rules:
+ * cancellation" phase, docs/DECISIONS.md D10/D15/D17. Deliberately narrow,
+ * per this phase's approved rules:
  *  - Only bookings created via createManualBookingTransactional are
  *    eligible: `source` must be "staff_walkin" or "staff_phone" (excludes
  *    online holds/bookings, and any future "staff_party" source — Party is
  *    out of scope). Checked directly, not inferred from `bookingStatus`
  *    alone, so this stays correct even once a future phase teaches online
  *    bookings to reach `bookingStatus: "confirmed"` too.
- *  - Only `paymentStatus: "unpaid"` bookings are eligible — the only value
- *    that exists for manual bookings today (D14), checked explicitly so
- *    this doesn't silently widen once a future phase adds payment
- *    recording and `paymentStatus` can become something else.
+ *  - Only bookings with NO recorded payment (`amountPaidMinor` absent or
+ *    zero) are eligible (docs/DECISIONS.md D17) — rejected with a clear,
+ *    distinct message otherwise, until a refund policy exists. Since D17
+ *    requires every NEW manual booking to record an LKR 1,000 advance at
+ *    creation, this means a booking created under D17 can never be
+ *    cancelled through this path — that is the intended, direct
+ *    consequence of the business decision, not an oversight. A booking
+ *    created BEFORE D17 (legitimately `paymentStatus: "unpaid"`, no
+ *    `amountPaidMinor` field at all) remains cancellable exactly as before
+ *    — existing unpaid-cancellation behavior is preserved unchanged.
  *  - Only standard rooms (packages where `isBookableOnline` is true) —
  *    excludes Party (room 6), same check `createManualBookingTransactional`
  *    already uses to keep Party out of the manual-booking surface.
@@ -530,6 +588,8 @@ interface RawBookingForCancellation {
   readonly endMinute: number;
   readonly bookingStatus: string;
   readonly paymentStatus?: string;
+  /** Absent on a booking created before docs/DECISIONS.md D17 — treated as 0. */
+  readonly amountPaidMinor?: number;
   readonly source?: string;
   readonly cancelledAtMillis?: number;
   readonly cancelledBy?: string;
@@ -580,8 +640,18 @@ export async function cancelManualBookingTransactional(
         "Only staff/owner-entered manual bookings can be cancelled here.",
       );
     }
-    if (booking.paymentStatus !== "unpaid") {
-      throw new HttpsError("failed-precondition", "Only unpaid bookings can be cancelled here.");
+    const amountPaidMinor = booking.amountPaidMinor ?? 0;
+    if (amountPaidMinor > 0) {
+      // docs/DECISIONS.md D17 — never silently refund, forfeit, or erase a
+      // recorded advance. A booking with ANY recorded payment is blocked
+      // from this cancellation path entirely until a refund policy exists;
+      // a legacy booking with no recorded payment (amountPaidMinor absent
+      // or 0) is unaffected — existing unpaid-cancellation behavior is
+      // preserved exactly.
+      throw new HttpsError(
+        "failed-precondition",
+        "This booking has a recorded payment and cannot be cancelled until the refund policy is decided. Contact the owner.",
+      );
     }
 
     const facts = getPackageFacts(booking.packageId);
@@ -758,8 +828,15 @@ export interface ExtendManualBookingResult {
   readonly extensionChargesMinor: number;
   /** totalAmountMinor + extensionChargesMinor, computed. */
   readonly newTotalAmountMinor: number;
+  /** Never changed by an extension (docs/DECISIONS.md D17) — an extension grows the total/balance, never the amount paid. */
+  readonly amountPaidMinor: number;
+  /** newTotalAmountMinor - amountPaidMinor, computed — necessarily larger than before this extension. */
+  readonly balanceDueMinor: number;
   readonly currency: "LKR";
 }
+
+/** The only payment states a manual booking can legitimately carry (docs/DECISIONS.md D17) — anything else (an online/PayHere state) is rejected, defense-in-depth. */
+const MANUAL_BOOKING_PAYMENT_STATES = new Set<PaymentStatus>(["unpaid", "partially_paid", "paid"]);
 
 interface RawBookingForExtension {
   readonly packageId: string;
@@ -773,6 +850,8 @@ interface RawBookingForExtension {
   readonly totalAmountMinor: number;
   readonly extensionCount?: number;
   readonly extensionChargesMinor?: number;
+  /** Absent on a booking created before docs/DECISIONS.md D17 — treated as 0. Never changed by an extension. */
+  readonly amountPaidMinor?: number;
 }
 
 interface ExtensionIdempotencyRecord {
@@ -829,8 +908,12 @@ export async function extendManualBookingTransactional(
         "Only staff/owner-entered manual bookings can be extended here.",
       );
     }
-    if (booking.paymentStatus !== "unpaid") {
-      throw new HttpsError("failed-precondition", "Only unpaid bookings can be extended here.");
+    // docs/DECISIONS.md D17 — unpaid, partially paid, AND fully paid manual
+    // bookings are all extendable; only an online/PayHere payment state
+    // (which a manual booking should never actually carry) is rejected,
+    // defense-in-depth.
+    if (!booking.paymentStatus || !MANUAL_BOOKING_PAYMENT_STATES.has(booking.paymentStatus as PaymentStatus)) {
+      throw new HttpsError("failed-precondition", "This booking's payment status does not allow extension here.");
     }
 
     const facts = getPackageFacts(booking.packageId);
@@ -912,13 +995,26 @@ export async function extendManualBookingTransactional(
     const newExtensionCount = (booking.extensionCount ?? 0) + 1;
     const newExtensionChargesMinor = (booking.extensionChargesMinor ?? 0) + EXTENSION_FEE_MINOR;
 
-    // Same room/date/start time/capacity — only endMinute and the
-    // extension summary fields change. totalAmountMinor (the original
-    // package price) is never touched.
+    // docs/DECISIONS.md D17 — the extra charge grows the total, so
+    // paymentStatus must be re-derived against the NEW total here (never
+    // left stale): a booking that was "paid" a moment ago is correctly
+    // "partially_paid" again once the total grows past what's been paid.
+    // amountPaidMinor itself is never written by this function.
+    const amountPaidMinorForStatus = booking.amountPaidMinor ?? 0;
+    const newPaymentStatus = derivePaymentStatus(
+      amountPaidMinorForStatus,
+      currentBookingTotalMinor(booking.totalAmountMinor, newExtensionChargesMinor),
+    );
+
+    // Same room/date/start time/capacity — only endMinute, the extension
+    // summary fields, and the re-derived paymentStatus change.
+    // totalAmountMinor (the original package price) and amountPaidMinor are
+    // never touched.
     transaction.update(bookingRef, {
       endMinute: newEndMinute,
       extensionCount: newExtensionCount,
       extensionChargesMinor: newExtensionChargesMinor,
+      paymentStatus: newPaymentStatus,
     });
 
     const extensionRef = bookingRef.collection(COLLECTIONS.bookingExtensions).doc();
@@ -945,6 +1041,12 @@ export async function extendManualBookingTransactional(
       createdAt: FieldValue.serverTimestamp(),
     });
 
+    // Never touched by an extension (docs/DECISIONS.md D17) — the extra
+    // hour's charge grows the total and, since amountPaidMinor is
+    // unchanged, the balance due — never the amount already paid.
+    const amountPaidMinor = booking.amountPaidMinor ?? 0;
+    const newTotalAmountMinor = booking.totalAmountMinor + newExtensionChargesMinor;
+
     const response: ExtendManualBookingResult = {
       bookingId: params.bookingId,
       roomId: booking.roomId,
@@ -956,7 +1058,9 @@ export async function extendManualBookingTransactional(
       totalAmountMinor: booking.totalAmountMinor,
       extensionCount: newExtensionCount,
       extensionChargesMinor: newExtensionChargesMinor,
-      newTotalAmountMinor: booking.totalAmountMinor + newExtensionChargesMinor,
+      newTotalAmountMinor,
+      amountPaidMinor,
+      balanceDueMinor: newTotalAmountMinor - amountPaidMinor,
       currency: "LKR",
     };
 

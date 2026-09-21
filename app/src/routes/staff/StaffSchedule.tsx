@@ -4,6 +4,7 @@ import { Link, useSearchParams } from "react-router";
 import { CancelBookingDialog } from "@/components/staff/CancelBookingDialog";
 import { DateNav } from "@/components/staff/DateNav";
 import { ExtendBookingDialog } from "@/components/staff/ExtendBookingDialog";
+import { RecordPaymentDialog } from "@/components/staff/RecordPaymentDialog";
 import { RequireRole } from "@/components/staff/RequireRole";
 import {
   PARTY_ROOM_ID,
@@ -13,6 +14,7 @@ import {
   groupByRoom,
   isCancelEligible,
   isExtendEligible,
+  isPaymentEligible,
   roomNumber,
 } from "@/components/staff/scheduleFormat";
 import { StaffTopBar } from "@/components/staff/StaffTopBar";
@@ -35,20 +37,44 @@ const STATUS_KEY = {
   other: "staff.statusOther",
 } as const;
 
+function PaymentBadge({ booking }: { booking: ScheduleBooking }) {
+  const { t } = useI18n();
+  if (booking.paymentStatus === "paid") {
+    return <Badge variant="positive">{t("staff.paidBadge")}</Badge>;
+  }
+  if (booking.paymentStatus === "partially_paid") {
+    return (
+      <Badge variant="warning">
+        {t("staff.partiallyPaidBadge")}
+        {booking.balanceDueMinor !== null
+          ? ` · ${t("staff.balanceDueLabel")} ${t("packages.priceLabel", { price: (booking.balanceDueMinor / 100).toLocaleString("en-LK") })}`
+          : ""}
+      </Badge>
+    );
+  }
+  if (booking.paymentStatus === "unpaid") {
+    return <Badge variant="warning">{t("staff.unpaidBadge")}</Badge>;
+  }
+  return null;
+}
+
 function BookingRow({
   booking,
   dateISO,
   onRequestCancel,
   onRequestExtend,
+  onRequestPayment,
 }: {
   booking: ScheduleBooking;
   dateISO: string;
   onRequestCancel: (booking: ScheduleBooking) => void;
   onRequestExtend: (booking: ScheduleBooking) => void;
+  onRequestPayment: (booking: ScheduleBooking) => void;
 }) {
   const { t } = useI18n();
   const cancelEligible = isCancelEligible(booking, dateISO);
   const extendEligible = isExtendEligible(booking, dateISO);
+  const paymentEligible = isPaymentEligible(booking);
 
   return (
     <div className="flex flex-col gap-2 rounded-md border border-border-subtle p-3 sm:flex-row sm:items-center sm:justify-between">
@@ -68,11 +94,16 @@ function BookingRow({
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        {booking.paymentStatus === "unpaid" ? <Badge variant="warning">{t("staff.unpaidBadge")}</Badge> : null}
+        <PaymentBadge booking={booking} />
         <Badge variant={STATUS_BADGE_VARIANT[booking.displayStatus]}>{t(STATUS_KEY[booking.displayStatus])}</Badge>
         {extendEligible ? (
           <Button type="button" variant="outline" size="sm" onClick={() => onRequestExtend(booking)}>
             {t("staff.extendBooking.button")}
+          </Button>
+        ) : null}
+        {paymentEligible ? (
+          <Button type="button" variant="outline" size="sm" onClick={() => onRequestPayment(booking)}>
+            {t("staff.recordPayment.button")}
           </Button>
         ) : null}
         {cancelEligible ? (
@@ -95,6 +126,7 @@ function ScheduleBody() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [cancelTarget, setCancelTarget] = useState<ScheduleBooking | null>(null);
   const [extendTarget, setExtendTarget] = useState<ScheduleBooking | null>(null);
+  const [paymentTarget, setPaymentTarget] = useState<ScheduleBooking | null>(null);
   const { data: bookings, error } = usePromise(() => getStaffSchedule(dateISO), [dateISO, refreshKey]);
 
   const grouped = bookings ? groupByRoom(bookings) : null;
@@ -141,6 +173,7 @@ function ScheduleBody() {
                         dateISO={dateISO}
                         onRequestCancel={setCancelTarget}
                         onRequestExtend={setExtendTarget}
+                        onRequestPayment={setPaymentTarget}
                       />
                     ))
                   )}
@@ -182,6 +215,19 @@ function ScheduleBody() {
             // data behind it now (docs/PROGRESS.md "refresh booking data
             // after... a stale-state conflict"), but leave the dialog open
             // so the error message explaining why stays visible.
+            setRefreshKey((key) => key + 1);
+          }}
+        />
+      ) : null}
+
+      {paymentTarget ? (
+        <RecordPaymentDialog
+          booking={paymentTarget}
+          onClose={() => setPaymentTarget(null)}
+          onRecorded={() => {
+            setPaymentTarget(null);
+            // Re-fetch so the new amount paid, balance, and payment status
+            // badge all reflect the real, just-written server state.
             setRefreshKey((key) => key + 1);
           }}
         />
