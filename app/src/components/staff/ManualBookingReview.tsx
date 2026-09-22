@@ -72,19 +72,19 @@ export function ManualBookingReview({
         ))}
         <div className="flex items-center justify-between gap-4 px-4 py-3">
           <dt className="font-semibold text-foreground">{t("booking.review.totalLabel")}</dt>
-          <dd className="text-lg font-semibold text-foreground">
+          <dd className="text-lg font-semibold text-foreground tabular-nums">
             {t("packages.priceLabel", { price: pkg.priceLKR.toLocaleString("en-LK") })}
           </dd>
         </div>
-        <div className="flex items-center justify-between gap-4 px-4 py-3">
-          <dt className="text-sm text-muted-foreground">{t("staff.manualBooking.advanceAmountLabel")}</dt>
-          <dd className="text-sm font-medium text-foreground">
+        <div className="flex items-center justify-between gap-4 bg-gold/5 px-4 py-3">
+          <dt className="text-sm text-foreground">{t("staff.manualBooking.advanceAmountLabel")}</dt>
+          <dd className="text-sm font-semibold text-gold tabular-nums">
             {t("packages.priceLabel", { price: ADVANCE_AMOUNT_LKR.toLocaleString("en-LK") })}
           </dd>
         </div>
         <div className="flex items-center justify-between gap-4 px-4 py-3">
           <dt className="text-sm text-muted-foreground">{t("staff.manualBooking.balanceAfterAdvanceLabel")}</dt>
-          <dd className="text-sm font-medium text-foreground">
+          <dd className="text-sm font-medium text-foreground tabular-nums">
             {t("packages.priceLabel", { price: balanceAfterAdvanceLKR.toLocaleString("en-LK") })}
           </dd>
         </div>
@@ -92,7 +92,11 @@ export function ManualBookingReview({
 
       <Notice variant="warning">{t("staff.manualBooking.advanceRequiredNotice")}</Notice>
 
-      <label className="flex items-start gap-2.5 rounded-lg border border-border-subtle bg-card p-3.5 text-sm">
+      <label
+        className={`flex cursor-pointer items-start gap-2.5 rounded-lg border p-3.5 text-sm transition-colors duration-150 ${
+          advanceReceived ? "border-gold/50 bg-gold/5" : "border-border-subtle bg-card hover:border-border"
+        }`}
+      >
         <input
           type="checkbox"
           checked={advanceReceived}

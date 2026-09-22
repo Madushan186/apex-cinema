@@ -20,7 +20,7 @@ export function LanguageSwitch({ className }: { className?: string }) {
         aria-pressed={locale === "en"}
         onClick={() => setLocale("en")}
         className={cn(
-          "rounded-full px-2.5 py-1 font-medium transition-colors",
+          "rounded-full px-2.5 py-1 font-medium transition-colors duration-150",
           locale === "en" ? "bg-elevated text-foreground" : "text-muted-foreground hover:text-foreground",
         )}
       >
@@ -35,7 +35,7 @@ export function LanguageSwitch({ className }: { className?: string }) {
         onClick={() => setLocale("si")}
         lang="si"
         className={cn(
-          "rounded-full px-2.5 py-1 font-medium transition-colors",
+          "rounded-full px-2.5 py-1 font-medium transition-colors duration-150",
           locale === "si" ? "bg-elevated text-foreground" : "text-muted-foreground hover:text-foreground",
         )}
       >

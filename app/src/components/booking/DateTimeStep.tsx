@@ -61,7 +61,7 @@ export function DateTimeStep({
               onClick={() => onChangeDate(d)}
               aria-pressed={dateISO === d}
               className={cn(
-                "rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors",
+                "rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors duration-150",
                 dateISO === d ? "border-primary bg-primary/10 text-foreground" : "border-border-subtle text-muted-foreground hover:text-foreground",
               )}
             >
@@ -109,7 +109,7 @@ export function DateTimeStep({
                   aria-pressed={selected}
                   onClick={() => onChangeTime(slot.time)}
                   className={cn(
-                    "flex flex-col items-start gap-1 rounded-lg border bg-card p-3 text-left transition-colors",
+                    "flex flex-col items-start gap-1 rounded-lg border bg-card p-3 text-left transition-colors duration-150",
                     STATUS_STYLE[slot.status],
                     selected && !disabled && "border-primary bg-primary/10",
                   )}

@@ -21,8 +21,11 @@ function useNavItems() {
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   cn(
-    "rounded-md px-3 py-2 text-sm font-medium transition-colors",
-    isActive ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+    "relative rounded-md px-3 py-2 text-sm font-medium transition-colors duration-150",
+    "after:absolute after:inset-x-3 after:-bottom-[1px] after:h-0.5 after:rounded-full after:transition-opacity after:duration-150",
+    isActive
+      ? "text-foreground after:bg-gold after:opacity-100"
+      : "text-muted-foreground after:opacity-0 hover:text-foreground",
   );
 
 export function Header() {
@@ -89,7 +92,11 @@ export function Header() {
       </div>
 
       {menuOpen ? (
-        <div className="fixed inset-0 z-50 flex flex-col bg-background lg:hidden" role="dialog" aria-modal="true">
+        <div
+          className="animate-in fade-in slide-in-from-top-2 fixed inset-0 z-50 flex flex-col bg-background duration-200 lg:hidden"
+          role="dialog"
+          aria-modal="true"
+        >
           <div className="flex h-20 items-center justify-between border-b border-border-subtle px-4 sm:px-6">
             <Logo size="header" />
             <button
@@ -111,7 +118,7 @@ export function Header() {
                 onClick={closeMenu}
                 className={({ isActive }) =>
                   cn(
-                    "rounded-md px-3 py-3 text-base font-medium",
+                    "rounded-md px-3 py-3 text-base font-medium transition-colors duration-150",
                     isActive ? "bg-elevated text-foreground" : "text-muted-foreground hover:bg-elevated hover:text-foreground",
                   )
                 }

@@ -116,6 +116,29 @@
     outline: 2px solid var(--ring);
     outline-offset: 2px;
   }
+  /* A single, restrained heading rhythm reused everywhere instead of ad-hoc
+     sizes per page — tighter tracking at display sizes reads more
+     considered than the browser default, per docs/PROGRESS.md UI-polish
+     phase. */
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+}
+
+/*
+ * Shared elevation + motion, used consistently rather than invented per
+ * component. `--shadow-elevated` is a soft, directional shadow (not the
+ * flat grey drop-shadow that reads as generic "card kit" chrome) — barely
+ * visible at rest, more present on hover/focus to suggest depth without
+ * glow. Durations sit in the 150–250ms band called for in the UI-polish
+ * brief; prefers-reduced-motion (above) already zeroes all of these.
+ */
+:root {
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 1px 1px rgb(0 0 0 / 0.3);
+  --shadow-elevated: 0 12px 24px -8px rgb(0 0 0 / 0.55), 0 4px 8px -4px rgb(0 0 0 / 0.4);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /*
@@ -145,4 +168,45 @@
    an accessible, OS-native calendar UI that still matches the dark theme. */
 input[type="date"] {
   color-scheme: dark;
+}
+
+/*
+ * Sticky header offset — anchor jumps (the skip-to-content link) and any
+ * future in-page anchor must land below the fixed 5rem header, never
+ * underneath it. Matches Header.tsx's h-20 (5rem) exactly.
+ */
+#main-content {
+  scroll-margin-top: 5rem;
+}
+
+/*
+ * A brief, subtle open/close for the native <dialog> (components/ui/dialog.tsx)
+ * — modern `@starting-style` transition, no JS, no animation library. Native
+ * <dialog> has two independent paint surfaces (the element itself and its
+ * ::backdrop), so both are animated together. Respects prefers-reduced-motion
+ * via the global rule above (which zeroes every transition-duration).
+ */
+dialog[open] {
+  animation: dialog-in 180ms var(--ease-standard);
+}
+dialog[open]::backdrop {
+  animation: backdrop-in 180ms var(--ease-standard);
+}
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }

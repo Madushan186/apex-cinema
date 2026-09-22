@@ -47,7 +47,7 @@ export function Packages() {
       <p className="mt-6 text-sm text-muted-foreground">{t("packages.extensionNote")}</p>
 
       {party ? (
-        <section className="mt-10 rounded-xl border border-primary/30 bg-elevated p-6 sm:p-8">
+        <section className="mt-10 rounded-xl border border-primary/30 bg-elevated p-6 shadow-[var(--shadow-card)] sm:p-8">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between lg:gap-10">
             <div className="flex flex-col gap-3">
               <span className="inline-flex w-fit items-center gap-2 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-xs font-semibold tracking-wide text-primary uppercase">
@@ -61,7 +61,7 @@ export function Packages() {
 
             <div className="flex flex-col gap-3 lg:w-72 lg:shrink-0">
               <div>
-                <p className="text-2xl font-semibold text-foreground">
+                <p className="text-2xl font-semibold text-foreground tabular-nums">
                   {t("packages.priceLabel", { price: party.priceLKR.toLocaleString("en-LK") })}
                 </p>
                 <p className="text-xs text-muted-foreground">{t("common.perSessionNoDuration")}</p>

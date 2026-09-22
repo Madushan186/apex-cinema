@@ -129,15 +129,15 @@ export function ExtendBookingDialog({
               {formatTimeOfDay(booking.startMinute)}–{formatTimeOfDay(newEnd)}
             </dd>
           </div>
-          <div className="flex items-center justify-between gap-4 px-4 py-2.5">
-            <dt className="text-muted-foreground">{t("staff.extendBooking.chargeLabel")}</dt>
-            <dd className="font-medium text-foreground">
+          <div className="flex items-center justify-between gap-4 bg-gold/5 px-4 py-2.5">
+            <dt className="text-foreground">{t("staff.extendBooking.chargeLabel")}</dt>
+            <dd className="font-semibold text-gold tabular-nums">
               {t("packages.priceLabel", { price: EXTENSION_FEE_LKR.toLocaleString("en-LK") })}
             </dd>
           </div>
           <div className="flex items-center justify-between gap-4 px-4 py-2.5">
             <dt className="font-semibold text-foreground">{t("staff.extendBooking.newTotalLabel")}</dt>
-            <dd className="text-lg font-semibold text-foreground">
+            <dd className="text-lg font-semibold text-foreground tabular-nums">
               {t("packages.priceLabel", { price: newTotalLKR.toLocaleString("en-LK") })}
             </dd>
           </div>

@@ -27,32 +27,52 @@ export function Home() {
     <>
       <section className="relative border-b border-border-subtle">
         <HeroBackground />
-        <div className="relative mx-auto flex max-w-6xl flex-col items-start gap-6 px-4 py-20 sm:px-6 sm:py-28">
-          <span className="text-xs font-semibold tracking-[0.2em] text-gold uppercase">{t("home.heroEyebrow")}</span>
-          <h1 className="max-w-3xl text-4xl font-semibold tracking-tight text-balance sm:text-5xl md:text-6xl">
-            {t("home.heroTitle")}
-          </h1>
-          <p className="max-w-xl text-lg text-muted-foreground">{t("home.heroSubtitle")}</p>
-          <div className="flex flex-wrap gap-3">
-            <Button asChild size="lg">
-              <Link to="/book">{t("home.heroCtaPrimary")}</Link>
-            </Button>
-            <Button asChild size="lg" variant="secondary">
-              <Link to="/packages">{t("home.heroCtaSecondary")}</Link>
-            </Button>
+        <div className="relative mx-auto grid max-w-6xl gap-10 px-4 py-16 sm:px-6 sm:py-24 lg:grid-cols-[1fr_20rem] lg:items-center lg:py-28">
+          <div className="flex flex-col items-start gap-6">
+            <span className="text-xs font-semibold tracking-[0.2em] text-gold uppercase">{t("home.heroEyebrow")}</span>
+            <h1 className="max-w-2xl text-4xl font-semibold tracking-tight text-balance sm:text-5xl md:text-6xl">
+              {t("home.heroTitle")}
+            </h1>
+            <p className="max-w-xl text-lg text-muted-foreground">{t("home.heroSubtitle")}</p>
+            <div className="flex flex-wrap gap-3">
+              <Button asChild size="lg">
+                <Link to="/book">{t("home.heroCtaPrimary")}</Link>
+              </Button>
+              <Button asChild size="lg" variant="secondary">
+                <Link to="/packages">{t("home.heroCtaSecondary")}</Link>
+              </Button>
+            </div>
+            <dl className="flex flex-wrap gap-x-8 gap-y-3 text-sm text-muted-foreground lg:hidden">
+              <div className="flex items-center gap-2">
+                <Ticket aria-hidden="true" className="size-4 text-gold" />
+                <span>{t("home.factsSession")}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <CalendarCheck aria-hidden="true" className="size-4 text-gold" />
+                <span>{t("home.factsHours")}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <ClipboardList aria-hidden="true" className="size-4 text-gold" />
+                <span>{t("home.factsFrom")}</span>
+              </div>
+            </dl>
           </div>
-          <dl className="mt-4 flex flex-wrap gap-x-8 gap-y-3 text-sm text-muted-foreground">
-            <div className="flex items-center gap-2">
-              <Ticket aria-hidden="true" className="size-4 text-gold" />
-              <span>{t("home.factsSession")}</span>
+
+          {/* Balances the empty right half at wide viewports with real
+              information (not decoration) — the same three facts shown
+              inline on smaller screens, above. */}
+          <dl className="hidden flex-col gap-4 rounded-xl border border-border bg-card/80 p-6 shadow-[var(--shadow-elevated)] backdrop-blur-sm lg:flex">
+            <div className="flex items-start gap-3">
+              <Ticket aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-gold" />
+              <span className="text-sm text-foreground">{t("home.factsSession")}</span>
             </div>
-            <div className="flex items-center gap-2">
-              <CalendarCheck aria-hidden="true" className="size-4 text-gold" />
-              <span>{t("home.factsHours")}</span>
+            <div className="flex items-start gap-3">
+              <CalendarCheck aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-gold" />
+              <span className="text-sm text-foreground">{t("home.factsHours")}</span>
             </div>
-            <div className="flex items-center gap-2">
-              <ClipboardList aria-hidden="true" className="size-4 text-gold" />
-              <span>{t("home.factsFrom")}</span>
+            <div className="flex items-start gap-3">
+              <ClipboardList aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-gold" />
+              <span className="text-sm text-foreground">{t("home.factsFrom")}</span>
             </div>
           </dl>
         </div>

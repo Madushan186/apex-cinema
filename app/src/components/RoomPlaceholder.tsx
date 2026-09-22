@@ -10,7 +10,7 @@ export function RoomPlaceholder({ label, caption, className }: { label: string; 
   return (
     <div
       className={cn(
-        "relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-lg border border-border-subtle bg-gradient-to-br from-elevated via-card to-background px-4 text-center",
+        "group relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-lg border border-border-subtle bg-gradient-to-br from-elevated via-card to-background px-4 text-center transition-colors duration-150 hover:border-gold/40",
         className,
       )}
     >
@@ -22,7 +22,11 @@ export function RoomPlaceholder({ label, caption, className }: { label: string; 
             "linear-gradient(115deg, transparent 40%, rgba(201,24,37,0.12) 50%, transparent 60%)",
         }}
       />
-      <ImageIcon aria-hidden="true" className="size-6 text-muted-foreground" />
+      {/* A thin corner frame, echoing a film-strip sprocket edge — a small,
+          restrained nod to the subject matter rather than plain empty
+          space, never presented as an actual photo. */}
+      <div aria-hidden="true" className="absolute inset-3 rounded-md border border-border-subtle/60" />
+      <ImageIcon aria-hidden="true" className="relative size-6 text-muted-foreground transition-colors duration-150 group-hover:text-gold" />
       <p className="relative text-sm font-medium text-foreground">{label}</p>
       <p className="relative text-xs text-muted-foreground">{caption}</p>
     </div>

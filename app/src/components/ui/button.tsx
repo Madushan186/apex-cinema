@@ -8,7 +8,10 @@ const buttonVariants = cva(
   // a box-shadow drawn outside the border-box, so on our dark surfaces a
   // 50%-opacity gold ring measured under 3:1 contrast in testing — fully
   // opaque gold reads clearly against every surface (see docs/DESIGN.md).
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring focus-visible:ring-[3px] aria-invalid:ring-destructive/20 aria-invalid:border-destructive",
+  // duration-150 + active:scale-[0.98]: brief, restrained press feedback —
+  // within the 150–250ms band, never on hover (hover already changes
+  // fill/border, a second hover-triggered motion would be redundant).
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50 disabled:active:scale-100 [&_svg]:pointer-events-none [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring focus-visible:ring-[3px] aria-invalid:ring-destructive/20 aria-invalid:border-destructive",
   {
     variants: {
       variant: {

@@ -11,9 +11,9 @@ export function FaqAccordion({ itemKeys = ALL_FAQ_KEYS }: { itemKeys?: readonly 
     <div className="flex flex-col divide-y divide-border-subtle rounded-lg border border-border-subtle bg-card">
       {itemKeys.map((key) => (
         <details key={key} className="group p-4 open:pb-4">
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 font-medium text-foreground marker:content-none">
+          <summary className="-m-1 flex cursor-pointer list-none items-center justify-between gap-3 rounded-md p-1 font-medium text-foreground transition-colors duration-150 marker:content-none hover:text-gold">
             {t(`faq.items.${key}.q`)}
-            <ChevronDown aria-hidden="true" className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+            <ChevronDown aria-hidden="true" className="size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-180" />
           </summary>
           <p className="mt-2 text-sm text-muted-foreground">{t(`faq.items.${key}.a`)}</p>
         </details>
