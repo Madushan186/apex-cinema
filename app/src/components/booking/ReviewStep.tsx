@@ -1,3 +1,4 @@
+import { ADVANCE_AMOUNT_LKR } from "@apex-cinema/booking-core";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 import type { PackageDefinition, SlotTime } from "@/data/types";
@@ -32,6 +33,7 @@ export function ReviewStep({
   const { t, locale } = useI18n();
   const sessionMinutes = pkg.sessionMinutes ?? 180;
   const endTime = formatEndTime(time, sessionMinutes);
+  const balanceLKR = pkg.priceLKR - ADVANCE_AMOUNT_LKR;
 
   const rows: [string, string][] = [
     [t("booking.review.packageLabel"), t(`packages.tiers.${pkg.id}.name`)],
@@ -53,8 +55,20 @@ export function ReviewStep({
         ))}
         <div className="flex items-center justify-between gap-4 px-4 py-3">
           <dt className="font-semibold text-foreground">{t("booking.review.totalLabel")}</dt>
-          <dd className="text-lg font-semibold text-foreground">
+          <dd className="text-lg font-semibold text-foreground tabular-nums">
             {t("packages.priceLabel", { price: pkg.priceLKR.toLocaleString("en-LK") })}
+          </dd>
+        </div>
+        <div className="flex items-center justify-between gap-4 bg-gold/5 px-4 py-3">
+          <dt className="text-sm text-foreground">{t("booking.review.advanceLabel")}</dt>
+          <dd className="text-sm font-semibold text-gold tabular-nums">
+            {t("packages.priceLabel", { price: ADVANCE_AMOUNT_LKR.toLocaleString("en-LK") })}
+          </dd>
+        </div>
+        <div className="flex items-center justify-between gap-4 px-4 py-3">
+          <dt className="text-sm text-muted-foreground">{t("booking.review.balanceLabel")}</dt>
+          <dd className="text-sm font-medium text-foreground tabular-nums">
+            {t("packages.priceLabel", { price: balanceLKR.toLocaleString("en-LK") })}
           </dd>
         </div>
       </dl>

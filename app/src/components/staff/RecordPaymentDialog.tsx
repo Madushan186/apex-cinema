@@ -120,15 +120,15 @@ export function RecordPaymentDialog({
           </div>
           <div className="flex items-center justify-between gap-4 px-4 py-2.5">
             <dt className="text-muted-foreground">{t("staff.recordPayment.totalLabel")}</dt>
-            <dd className="font-medium text-foreground">{t("packages.priceLabel", { price: formatLKR(totalMinor) })}</dd>
+            <dd className="font-medium text-foreground tabular-nums">{t("packages.priceLabel", { price: formatLKR(totalMinor) })}</dd>
           </div>
-          <div className="flex items-center justify-between gap-4 px-4 py-2.5">
+          <div className="flex items-center justify-between gap-4 bg-status-positive/5 px-4 py-2.5">
             <dt className="text-muted-foreground">{t("staff.recordPayment.paidLabel")}</dt>
-            <dd className="font-medium text-foreground">{t("packages.priceLabel", { price: formatLKR(paidMinor) })}</dd>
+            <dd className="font-medium text-status-positive tabular-nums">{t("packages.priceLabel", { price: formatLKR(paidMinor) })}</dd>
           </div>
           <div className="flex items-center justify-between gap-4 px-4 py-2.5">
             <dt className="font-semibold text-foreground">{t("staff.recordPayment.balanceLabel")}</dt>
-            <dd className="text-lg font-semibold text-foreground">{t("packages.priceLabel", { price: formatLKR(balanceMinor) })}</dd>
+            <dd className="text-lg font-semibold text-foreground tabular-nums">{t("packages.priceLabel", { price: formatLKR(balanceMinor) })}</dd>
           </div>
         </dl>
 

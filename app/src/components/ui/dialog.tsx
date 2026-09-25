@@ -64,7 +64,7 @@ export function Dialog({
         if (event.target === event.currentTarget) onOpenChange(false);
       }}
       className={cn(
-        "m-auto w-[min(28rem,calc(100vw-2rem))] rounded-lg border border-border bg-card p-0 text-foreground shadow-lg backdrop:bg-black/60",
+        "m-auto w-[min(28rem,calc(100vw-2rem))] rounded-lg border border-border bg-card p-0 text-foreground shadow-[var(--shadow-elevated)] backdrop:bg-black/70",
         className,
       )}
     >

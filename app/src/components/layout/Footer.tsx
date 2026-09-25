@@ -15,25 +15,25 @@ export function Footer() {
         </div>
 
         <nav aria-label={t("nav.packages")} className="flex flex-col gap-2 text-sm">
-          <NavLink to="/packages" className="text-muted-foreground hover:text-foreground">
+          <NavLink to="/packages" className="text-muted-foreground transition-colors duration-150 hover:text-foreground">
             {t("nav.packages")}
           </NavLink>
-          <NavLink to="/rooms" className="text-muted-foreground hover:text-foreground">
+          <NavLink to="/rooms" className="text-muted-foreground transition-colors duration-150 hover:text-foreground">
             {t("nav.rooms")}
           </NavLink>
-          <NavLink to="/party" className="text-muted-foreground hover:text-foreground">
+          <NavLink to="/party" className="text-muted-foreground transition-colors duration-150 hover:text-foreground">
             {t("nav.party")}
           </NavLink>
         </nav>
 
         <nav aria-label={t("nav.contact")} className="flex flex-col gap-2 text-sm">
-          <NavLink to="/faq" className="text-muted-foreground hover:text-foreground">
+          <NavLink to="/faq" className="text-muted-foreground transition-colors duration-150 hover:text-foreground">
             {t("nav.faq")}
           </NavLink>
-          <NavLink to="/policies" className="text-muted-foreground hover:text-foreground">
+          <NavLink to="/policies" className="text-muted-foreground transition-colors duration-150 hover:text-foreground">
             {t("nav.policies")}
           </NavLink>
-          <NavLink to="/contact" className="text-muted-foreground hover:text-foreground">
+          <NavLink to="/contact" className="text-muted-foreground transition-colors duration-150 hover:text-foreground">
             {t("nav.contact")}
           </NavLink>
         </nav>

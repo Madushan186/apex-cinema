@@ -47,6 +47,18 @@ Computed with the actual WCAG relative-luminance formula against the rendered to
 
 **Focus ring, found and fixed during browser testing:** shadcn's default `Button` used `focus-visible:ring-ring/50` (translucent, 50% opacity). Live-testing the real page under keyboard navigation showed a nearly invisible ring on the red primary button. Since the ring is a box-shadow drawn outside the border-box (against the page background, not the button fill), a fully opaque gold ring (`focus-visible:ring-ring` — dropped the `/50`) gives a crisp, high-contrast indicator on every surface. Fixed in `components/ui/button.tsx`; the same translucent-ring issue on the `destructive` variant (`ring-destructive/20`) was fixed the same way.
 
+## 3a. Elevation & motion tokens (UI-polish phase, presentation only)
+
+Added alongside the existing colour tokens in `app/src/index.css`, reused everywhere rather than invented per component:
+
+| Token | Value | Role |
+|---|---|---|
+| `--shadow-card` | `0 1px 2px rgb(0 0 0 / 0.4), 0 1px 1px rgb(0 0 0 / 0.3)` | Resting elevation on `Card` and package/room cards |
+| `--shadow-elevated` | `0 12px 24px -8px rgb(0 0 0 / 0.55), 0 4px 8px -4px rgb(0 0 0 / 0.4)` | Dialogs, hover state on interactive cards — a soft directional shadow, not a flat grey "card kit" drop-shadow |
+| `--ease-standard` | `cubic-bezier(0.4, 0, 0.2, 1)` | Shared easing for the dialog open/close keyframes |
+
+All new transitions/animations sit in the 150–250ms band and are fully zeroed by the existing `prefers-reduced-motion` rule in `index.css` (animation/transition duration forced to `0.01ms`, one iteration). No animation library was added — everything uses native CSS (`@keyframes`, Tailwind's built-in `transition-colors`) plus the already-installed `tw-animate-css` utility classes (used only for the mobile menu's fade/slide-in).
+
 ## 4. Layout & interaction choices
 
 - **Date picker**: a native `<input type="date">` (with `color-scheme: dark` so Chromium/WebKit render their own picker UI in dark mode for free) plus quick-pick chips for Today/Tomorrow/+2/+3/+4 days. Chosen over a hand-built calendar grid — native date inputs carry their own keyboard/screen-reader semantics that are hard to beat, and this avoids a calendar-widget dependency.

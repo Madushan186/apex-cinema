@@ -71,7 +71,11 @@ export function ManualBookingForm({
   }
 
   return (
-    <form className="flex flex-col gap-6" onSubmit={handleSubmit} noValidate>
+    <form className="flex flex-col gap-8" onSubmit={handleSubmit} noValidate>
+      <div className="flex flex-col gap-6">
+        <h2 className="text-xs font-semibold tracking-[0.15em] text-gold uppercase">
+          {t("staff.manualBooking.sessionSectionTitle")}
+        </h2>
       <div>
         <p className="mb-2 text-sm font-medium text-foreground">{t("staff.manualBooking.packageLabel")}</p>
         {packagesLoading ? (
@@ -103,7 +107,7 @@ export function ManualBookingForm({
                 <label
                   key={pkg.id}
                   className={cn(
-                    "relative flex cursor-pointer flex-col gap-1 rounded-lg border p-3 transition-colors",
+                    "relative flex cursor-pointer flex-col gap-1 rounded-lg border p-3 transition-colors duration-150",
                     checked ? "border-primary bg-primary/5" : "border-border bg-card hover:border-border-subtle",
                   )}
                 >
@@ -143,7 +147,7 @@ export function ManualBookingForm({
               onClick={() => update({ dateISO: d, time: null })}
               aria-pressed={value.dateISO === d}
               className={cn(
-                "rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors",
+                "rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors duration-150",
                 value.dateISO === d
                   ? "border-primary bg-primary/10 text-foreground"
                   : "border-border-subtle text-muted-foreground hover:text-foreground",
@@ -193,7 +197,7 @@ export function ManualBookingForm({
                   aria-pressed={selected}
                   onClick={() => update({ time: time as SlotTime })}
                   className={cn(
-                    "flex flex-col items-start gap-1 rounded-lg border bg-card p-3 text-left transition-colors",
+                    "flex flex-col items-start gap-1 rounded-lg border bg-card p-3 text-left transition-colors duration-150",
                     STATUS_STYLE[status],
                     selected && !disabled && "border-primary bg-primary/10",
                   )}
@@ -217,7 +221,12 @@ export function ManualBookingForm({
         )}
         {errors.time ? <p className="mt-1.5 text-xs text-status-negative">{errors.time}</p> : null}
       </div>
+      </div>
 
+      <div className="flex flex-col gap-6 border-t border-border-subtle pt-8">
+        <h2 className="text-xs font-semibold tracking-[0.15em] text-gold uppercase">
+          {t("staff.manualBooking.customerSectionTitle")}
+        </h2>
       <Field label={t("staff.manualBooking.peopleLabel")} required error={errors.peopleCount}>
         {(fieldProps) => (
           <Input
@@ -261,21 +270,39 @@ export function ManualBookingForm({
           />
         )}
       </Field>
+      </div>
+
+      <div className="flex flex-col gap-6 border-t border-border-subtle pt-8">
+        <h2 className="text-xs font-semibold tracking-[0.15em] text-gold uppercase">
+          {t("staff.manualBooking.detailsSectionTitle")}
+        </h2>
 
       <div className="flex flex-col gap-2">
         <Label>{t("staff.manualBooking.sourceLabel")}</Label>
-        <div className="flex gap-4">
-          {(["staff_walkin", "staff_phone"] as ManualBookingSource[]).map((source) => (
-            <label key={source} className="flex items-center gap-2 text-sm text-foreground">
-              <input
-                type="radio"
-                name="manual-booking-source"
-                checked={value.source === source}
-                onChange={() => update({ source })}
-              />
-              {source === "staff_walkin" ? t("staff.manualBooking.sourceWalkIn") : t("staff.manualBooking.sourcePhone")}
-            </label>
-          ))}
+        <div role="radiogroup" aria-label={t("staff.manualBooking.sourceLabel")} className="flex flex-wrap gap-2">
+          {(["staff_walkin", "staff_phone"] as ManualBookingSource[]).map((source) => {
+            const checked = value.source === source;
+            return (
+              <label
+                key={source}
+                className={cn(
+                  "cursor-pointer rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors duration-150",
+                  checked
+                    ? "border-primary bg-primary/10 text-foreground"
+                    : "border-border-subtle text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <input
+                  type="radio"
+                  name="manual-booking-source"
+                  checked={checked}
+                  onChange={() => update({ source })}
+                  className="sr-only"
+                />
+                {source === "staff_walkin" ? t("staff.manualBooking.sourceWalkIn") : t("staff.manualBooking.sourcePhone")}
+              </label>
+            );
+          })}
         </div>
       </div>
 
@@ -289,6 +316,7 @@ export function ManualBookingForm({
           />
         )}
       </Field>
+      </div>
 
       <div className="flex justify-end">
         <Button type="submit" size="lg" disabled={packagesUnavailable}>

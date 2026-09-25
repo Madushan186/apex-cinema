@@ -160,7 +160,7 @@ function Row({ label, value, note, mono }: { label: string; value: string; note?
   return (
     <div className="flex items-center justify-between gap-4 px-4 py-3">
       <dt className="text-sm text-muted-foreground">{label}</dt>
-      <dd className="text-right text-sm font-medium text-foreground">
+      <dd className="text-right text-sm font-medium text-foreground tabular-nums">
         <span className={mono ? "font-mono" : ""}>{value}</span>
         {note ? <span className="block text-xs font-normal text-muted-foreground">{note}</span> : null}
       </dd>

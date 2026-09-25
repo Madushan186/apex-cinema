@@ -107,9 +107,22 @@ function BookingRow({
           </Button>
         ) : null}
         {cancelEligible ? (
-          <Button type="button" variant="outline" size="sm" onClick={() => onRequestCancel(booking)}>
-            {t("staff.cancelBooking.button")}
-          </Button>
+          // Visually separated from the routine actions above (Extend,
+          // Record payment) — a small gap plus a hairline divider, and its
+          // own ghost/negative-tinted styling rather than the same neutral
+          // "outline" treatment every other action uses, so cancellation
+          // never sits as just one more button in the row.
+          <div className="ml-1 flex items-center gap-2 border-l border-border-subtle pl-3">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-status-negative hover:bg-status-negative/10 hover:text-status-negative"
+              onClick={() => onRequestCancel(booking)}
+            >
+              {t("staff.cancelBooking.button")}
+            </Button>
+          </div>
         ) : null}
       </div>
     </div>

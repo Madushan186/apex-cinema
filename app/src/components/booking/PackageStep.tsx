@@ -35,7 +35,7 @@ export function PackageStep({
             <label
               key={pkg.id}
               className={cn(
-                "relative flex cursor-pointer flex-col gap-2 rounded-lg border p-4 transition-colors",
+                "relative flex cursor-pointer flex-col gap-2 rounded-lg border p-4 transition-colors duration-150",
                 checked ? "border-primary bg-primary/5" : "border-border bg-card hover:border-border-subtle",
               )}
             >
@@ -51,7 +51,7 @@ export function PackageStep({
                 <span className="font-semibold text-foreground">{t(`packages.tiers.${pkg.id}.name`)}</span>
                 {checked ? <Check aria-hidden="true" className="size-4 text-primary" /> : null}
               </div>
-              <p className="text-lg font-semibold text-foreground">
+              <p className="text-lg font-semibold text-foreground tabular-nums">
                 {t("packages.priceLabel", { price: pkg.priceLKR.toLocaleString("en-LK") })}
               </p>
               <p className="text-xs text-muted-foreground">{t("common.perSession")}</p>

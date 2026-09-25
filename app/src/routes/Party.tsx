@@ -29,7 +29,7 @@ export function Party() {
 
         <div className="flex flex-col gap-6">
           <div>
-            <p className="text-2xl font-semibold text-foreground">{t("party.priceLabel")}</p>
+            <p className="text-2xl font-semibold text-foreground tabular-nums">{t("party.priceLabel")}</p>
             <p className="text-xs text-muted-foreground">{t("party.priceNote")}</p>
           </div>
 
